@@ -1405,15 +1405,6 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
 
     #wll0 = wll_sum / wll_count
 
-    # Initialize w_ll prior
-    #wll0 = np.zeros_like(sc)
-    #eps = 1e-6
-    #alpha = 0.5
-    #blended = alpha * fc + (1 - alpha) * sc
-    #wll0 = np.log(blended + eps)
-    wll0 = fc.copy()
-
-
     freqs = np.linspace(1, 80, 1000, endpoint=False)
     params = ParamsHP(a=par(-0.5,-0.5, 1/4, True, True), omega=par(omega0, omega0, 1/2, True, True),
                     sig_omega=par(sig_omega0, sig_omega0, 1/4, True, True),
