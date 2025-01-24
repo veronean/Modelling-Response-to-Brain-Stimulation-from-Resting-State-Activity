@@ -11,7 +11,6 @@ import os
 import gdown
 import pickle
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.cluster import KMeans
 from pathlib import Path
 
 warnings.filterwarnings('ignore')
