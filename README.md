@@ -55,13 +55,8 @@ Includes information on TMS stimulation and EEG channel positions:
 `requirements.txt`:
 The dependencies required for the project are:
     ```bash
-        gdown
-        scipy
-        pandas
-        mne
-        matplotlib
-        numpy
-    ```
+   pip install -r requirements.txt
+   ```
 
 ## Usage
 
