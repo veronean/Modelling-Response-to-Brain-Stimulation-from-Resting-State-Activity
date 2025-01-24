@@ -8,14 +8,14 @@ This project focuses on fitting the covariance matrix of resting-state activity 
 
 The repository is organized into the following directories:
 
-### 1. `structural_data`
+### 1. `struct_data`
 
 Contains structural information used to define effective connectivity, including:
 
 - **Leadfield matrix**: Maps sources to scalp-level EEG measurements.
 - **Connection gain matrix**: Represents effective connectivity between brain regions.
 
-### 2. `connection_data`
+### 2. `conn_data`
 
 Holds parcellation, structural, and functional connectivity data:
 
@@ -23,7 +23,7 @@ Holds parcellation, structural, and functional connectivity data:
 - **Structural connectivity (SC)**: Data describing physical connections between regions.
 - **Functional connectivity (FC)**: Correlation-based connectivity derived from resting-state activity.
 
-### 3. `tms_data`
+### 3. `eegtms_data`
 
 Includes information on TMS stimulation and EEG channel positions:
 
@@ -40,8 +40,8 @@ Includes information on TMS stimulation and EEG channel positions:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/<your-username>/brain-stimulation-model.git
-   cd brain-stimulation-model
+   git clone https://github.com/veronean/TMS-EEG-code.git
+   cd TMS-EEG-code
    ```
 2. Set up a virtual environment (optional but recommended):
    ```bash
@@ -92,7 +92,5 @@ Contributions are welcome! Please:
 2. Create a feature branch.
 3. Submit a pull request with a detailed description of your changes.
 
-## Acknowledgments
 
-Special thanks to collaborators and advisors, including Michele Allegra, Samir Suweis, Davide Momi, Simone Sarasso, and Maurizio Corbetta, for their insights and guidance.
 

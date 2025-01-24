@@ -8,20 +8,18 @@ import torch.nn as nn
 import warnings
 import time
 import os
+import gdown
 import pickle
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.cluster import KMeans
+from pathlib import Path
 
 warnings.filterwarnings('ignore')
 
 import sys
-sys.path.append('/home/veronese/Project/colab/Hopf')
 
 #neuroimaging packages
 import mne
-
-folder_path = '/home/veronese/Project/colab/Modelling_JR/'
-hopf_path =  '/home/veronese/Project/colab/Hopf/'
 
 # Suppression block
 class Suppressor:
@@ -1211,9 +1209,29 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     # Choose Subject
     subject_num = n_sub
 
+    repo_root = Path(__file__).resolve().parent
+
+    # Define the subfolders within your repo
+    struct_data_folder = repo_root / 'struct_data'
+    conn_data_folder = repo_root / 'conn_data'
+    eegtms_data_folder = repo_root / 'eegtms_data'
+
+    # Define the path to save the file
+    eeg_tms_file = eegtms_data_folder / 'Experiment_1.mat'
+
+    # If the file does not exist, download it from Google Drive
+    if not os.path.exists(eeg_tms_file):
+        print("EEG-TMS data not found. Downloading...")
+        # Google Drive file ID
+        file_id = '18fvsLjG1nmg43grW3dRpiXwEsRbYqRvS'
+        gdown.download(f'https://drive.google.com/uc?export=download&id={file_id}', str(eeg_tms_file), quiet=False)
+        print(f"Data downloaded to {eeg_tms_file}")
+    else:
+        print("EEG-TMS data already exists.")
+
     # Load data and layout information from .mat file
-    mat_data = scipy.io.loadmat(folder_path +'/Experiment_1.mat')
-    layout_mat_data = scipy.io.loadmat(folder_path +'/chlocs_nexstim.mat')
+    mat_data = scipy.io.loadmat(eeg_tms_file)
+    layout_mat_data = scipy.io.loadmat(eegtms_data_folder / 'chlocs_nexstim.mat')
 
     n_channels = 60
     sampling_freq = 725  # in Hertz
@@ -1325,7 +1343,7 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
         empCOV = trainCOV
 
     # Load connectivity matrix
-    atlas = pd.read_csv(folder_path + 'atlas_data.csv')
+    atlas = pd.read_csv(conn_data_folder / 'atlas_data.csv')
     labels = atlas['ROI Name']
     coords = np.array([atlas['R'], atlas['A'], atlas['S']]).T
 
@@ -1334,12 +1352,12 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
         for roi2 in range(coords.shape[0]):
             dist[roi1, roi2] = np.sqrt(np.sum((coords[roi1, :] - coords[roi2, :]) ** 2, axis=0))
 
-    sc_file = folder_path + 'Schaefer2018_200Parcels_7Networks_count.csv'
+    sc_file = conn_data_folder / 'Schaefer2018_200Parcels_7Networks_count.csv'
     sc_df = pd.read_csv(sc_file, header=None, sep=' ')
     sc = sc_df.values
     sc = np.log1p(sc) / np.linalg.norm(np.log1p(sc))
 
-    fc_path = '/home/veronese/Project/colab/FC/group_mean_fc.npy'
+    fc_path = conn_data_folder / 'group_mean_fc.npy'
     group_fc = np.load(fc_path)
     fc_shifted = group_fc
     log_fc = np.log1p(fc_shifted)
@@ -1348,27 +1366,11 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     node_size = sc.shape[0]
     output_size = n_channels
 
-    lm_name = os.path.join(hopf_path, 'struct_data',f'Subject{subject_num}_{train_region}_leadfield.npy')
+    lm_name = struct_data_folder / f'Subject{subject_num}_{train_region}_leadfield.npy'
     lm0 = np.load(lm_name)
 
-    # Upload Starting Leadfield Matrix
-    #lm_regions = ['Prefrontal', 'Premotor']
-    #lm_sum = None
-    #lm_count = 0
-    #for r in lm_regions:
-    #    lm_name = os.path.join(hopf_path, 'struct_data', f'Subject{subject_num}_{r}_leadfield.npy')
-    #    lm_region = np.load(lm_name)
-    #    
-    #    if lm_sum is None:
-    #        lm_sum = np.zeros_like(lm_region)
-    #    
-    #    lm_sum += lm_region
-    #    lm_count += 1
-    #
-    #lm0 = lm_sum / lm_count
-
-    #wll_name = os.path.join(hopf_path, 'struct_data', f'Subject{subject_num}_{train_region}_wll.npy')
-    #wll0 = np.load(wll_name)
+    wll_name = struct_data_folder / f'Subject{subject_num}_{train_region}_wll.npy'
+    wll0 = np.load(wll_name)
 
     # Upload Starting w_ll
     #wll_regions = ['Prefrontal', 'Premotor', 'Motor']
@@ -1441,7 +1443,7 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     F.PSD()
 
     # Save fitting results to a file using pickle
-    store_filename = os.path.join(hopf_path, 'Results', f'Subject{subject_num}_{train_region}_{loss_method}_{sched_type}_FC_fitting_results.pkl')
+    store_filename = repo_root / 'Results' / f'Subject{subject_num}_{train_region}_{loss_method}_{sched_type}_FC_fitting_results.pkl'
     with open(store_filename, 'wb') as file:
         pickle.dump(F, file)
     print("Results successfully saved to the file.")
