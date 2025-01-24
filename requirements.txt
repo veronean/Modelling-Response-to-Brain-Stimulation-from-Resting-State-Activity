@@ -1,0 +1,7 @@
+gdown
+scipy
+pandas
+torch
+scikit-learn
+mne
+numpy
