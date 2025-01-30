@@ -92,10 +92,6 @@ The `cov_main.py` script performs the following steps:
 - **Matplotlib**: Visualization of results.
 - **MNE-Python**: EEG/TMS data processing.
 
-## Contributors
-
-- **Andrea Veronese**: Lead developer and researcher.
-
 ## Contributing
 
 Contributions are welcome! Please:
