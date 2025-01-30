@@ -1458,6 +1458,6 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     print(f'Finished processing Subject {subject_num}, Region {train_region}')
 
 if __name__ == "__main__":
-    #main(valFlag=True, train_region='Premotor', val_region='Prefrontal', test_region='Motor')
-    main(n_sub = 1, train_region = 'Premotor')
+    main(valFlag=True, train_region='Premotor', val_region='Prefrontal', test_region='Motor')
+    #main(n_sub = 1, train_region = 'Premotor')
 
