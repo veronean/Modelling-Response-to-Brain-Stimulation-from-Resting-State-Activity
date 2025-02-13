@@ -677,7 +677,7 @@ class COVHOPF(AbstractNMM):
         C = (w_n_l + dg_l)
         S = torch.sum(C, axis=1)
         self.gamma = (torch.tensor(self.dist, dtype=torch.float32, device=device) / (v_d) 
-                      if v_d.ndimension() == 0 else torch.tensor(self.dist, dtype=torch.float32, device=device) / (v_d[:, None]))
+                      if v_d.ndimension() == 0 else torch.tensor(self.dist, dtype=torch.float32, device=device) / (v_d[None, :]))
 
         # EEG computation (Leadfield Matrix)
         lm_t = (self.lm.T / torch.sqrt(self.lm ** 2).sum(1)).T
@@ -1145,7 +1145,7 @@ class Model_fitting(AbstractFitting):
         C = (w_n_l + dg_l)
         S = torch.sum(C, axis=1)
         gamma = (torch.tensor(self.dist, dtype=torch.float32, device=device) / (v_d) 
-                      if v_d.ndimension() == 0 else torch.tensor(self.dist, dtype=torch.float32, device=device) / (v_d[:, None]))
+                      if v_d.ndimension() == 0 else torch.tensor(self.dist, dtype=torch.float32, device=device) / (v_d[None, :]))
 
         # EEG computation (Leadfield Matrix)
         lm_t = (self.model.lm.T / torch.sqrt(self.model.lm ** 2).sum(1)).T
