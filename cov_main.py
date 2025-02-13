@@ -8,17 +8,22 @@ import torch.nn as nn
 import warnings
 import time
 import os
-import gdown
 import pickle
 from sklearn.metrics.pairwise import cosine_similarity
-from pathlib import Path
+from sklearn.cluster import KMeans
+from scipy.special import erf
 
 warnings.filterwarnings('ignore')
 
 import sys
+sys.path.append('/home/veronese/Project/colab/Hopf')
 
 #neuroimaging packages
 import mne
+
+folder_path = '/home/veronese/Project/colab/Modelling_JR/'
+hopf_path =  '/home/veronese/Project/colab/Hopf/'
+neuro_path = '/home/veronese/Project/colab/neuromaps/'
 
 # Suppression block
 class Suppressor:
@@ -32,54 +37,86 @@ class Suppressor:
     sys.stdout = self.stdout_original
 
 class par:
-    def __init__(self, val, prior_mean = None, prior_var = None, fit_par = False, fit_hyper = False, asLog = False, device='cuda'):
+    def __init__(self, val, prior_mean=None, prior_var=None, fit_par=False, fit_hyper=False, 
+                 use_heterogeneity=False, h_map=None, device='cuda'):
         '''
         Parameters
         ----------
         val : Float
             The parameter value
-        prior_mean : Float
-            Prior mean of the data value
-        prior_var : Float
-            Prior variance of the value
-        fit_par: Bool
-            Whether the parameter value should be set to as a PyTorch Parameter
+        prior_mean : Float or Tuple
+            If use_heterogeneity is False: prior_mean for the parameter.
+            If use_heterogeneity is True: (prior_min_mean, prior_scale_mean).
+        prior_var : Float or Tuple
+            If use_heterogeneity is False: prior_var for the parameter.
+            If use_heterogeneity is True: (prior_min_var, prior_scale_var).
+        fit_par : Bool
+            Whether the parameter value should be set as a PyTorch Parameter
         fit_hyper : Bool
-            Whether the parameter prior mean and prior variance should be set as a PyTorch Parameter
-        asLog : Bool
-            Whether the log of the parameter value will be stored instead of the parameter itself.
+            Whether the prior mean and prior variance should be set as a PyTorch Parameter
+        use_heterogeneity : Bool
+            Whether this parameter should be computed using a heterogeneity map.
+        h_map : Tensor (Optional)
+            The heterogeneity map to be used (should match spatial dimensions of the parameter).
         '''
-
         self.device = device
+        self.use_heterogeneity = use_heterogeneity
+        self.h_map = torch.tensor(h_map, dtype=torch.float32, device=device) if h_map is not None else None
 
-        if np.all(prior_mean != None) & np.all(prior_var != None) & (asLog == False):
-            self.has_prior = True
-        elif np.all(prior_mean != None) & np.all(prior_var != None):
-            raise ValueError("currently asLog representation can not be used with priors")
-        elif np.all(prior_mean != None) | np.all(prior_var != None):
-            raise ValueError("prior_mean and prior_var must either be both None or both set")
+        if use_heterogeneity:
+            if not isinstance(prior_mean, tuple) and not isinstance(prior_var, tuple):
+                raise ValueError("For heterogeneity, prior_mean and prior_var must be tuples (min, scale)")
+            if np.all(prior_mean != None) and np.all(prior_var != None):
+                self.has_prior = True
+            else:
+                self.has_prior = False
+                prior_mean = (0, 0)
+                prior_var = (0, 0)
+                       
+            self.val_min = torch.tensor(val, dtype=torch.float32, device=device)
+            self.val_scale = torch.tensor(0.05, dtype=torch.float32, device=device)
+            
+            self.prior_min_mean = torch.tensor(prior_mean[0], dtype=torch.float32, device=device)
+            self.prior_scale_mean = torch.tensor(prior_mean[1], dtype=torch.float32, device=device)
+            self.prior_min_var = torch.tensor(prior_var[0], dtype=torch.float32, device=device)
+            self.prior_scale_var = torch.tensor(prior_var[1], dtype=torch.float32, device=device)
+            
+            self.fit_par = fit_par
+            self.fit_hyper = fit_hyper
+
+            if fit_par:
+                self.val_min = nn.Parameter(self.val_min)
+                self.val_scale = nn.Parameter(self.val_scale)
+            if fit_hyper:
+                self.prior_min_mean = nn.Parameter(self.prior_min_mean)
+                self.prior_min_var = nn.Parameter(self.prior_min_var)
+                self.prior_scale_mean = nn.Parameter(self.prior_scale_mean)
+                self.prior_scale_var = nn.Parameter(self.prior_scale_var)
+            
         else:
-            self.has_prior = False
-            prior_mean = 0
-            prior_var = 0
+            if np.all(prior_mean != None) & np.all(prior_var != None):
+                self.has_prior = True
+            elif np.all(prior_mean != None) | np.all(prior_var != None):
+                raise ValueError("prior_mean and prior_var must either be both None or both set")
+            else:
+                self.has_prior = False
+                prior_mean = 0
+                prior_var = 0
 
-        self.val = torch.tensor(val, dtype=torch.float32).to(device)
-        self.asLog = asLog 
-        if asLog:
-            self.val = torch.log(self.val)
+            self.val = torch.tensor(val, dtype=torch.float32).to(device)
+            
+            self.prior_mean = torch.tensor(prior_mean, dtype=torch.float32, device=device)
+            self.prior_var = torch.tensor(prior_var, dtype=torch.float32, device=device)
 
-        self.prior_mean = torch.tensor(prior_mean, dtype=torch.float32, device=device)
-        self.prior_var = torch.tensor(prior_var, dtype=torch.float32, device=device)
-        self.fit_par = fit_par
-        self.fit_hyper = fit_hyper
-
-        if fit_par:
-            self.val = nn.Parameter(self.val)
-
-        if fit_hyper:
-            self.prior_mean = nn.Parameter(self.prior_mean)
-            self.prior_var = nn.Parameter(self.prior_var)
-
+            self.fit_par = fit_par
+            self.fit_hyper = fit_hyper
+            
+            if fit_par:
+                self.val = nn.Parameter(self.val)
+            if fit_hyper:
+                self.prior_mean = nn.Parameter(self.prior_mean)
+                self.prior_var = nn.Parameter(self.prior_var)
+     
     def value(self):
         '''
         Returns
@@ -87,9 +124,9 @@ class par:
         Tensor of Value
             The parameter value(s) as a PyTorch Tensor
         '''
-
-        if self.asLog:
-            return torch.exp(self.val)
+        if self.use_heterogeneity and self.h_map is not None:
+            w = self.val_min + self.val_scale * self.h_map
+            return w
         else:
             return self.val
 
@@ -100,98 +137,93 @@ class par:
         NumPy of Value
             The parameter value(s) as a NumPy Array
         '''
-
-        if self.asLog:
-            return np.exp(self.val.detach().clone().cpu().numpy())
-        else:
-            return self.val.detach().clone().cpu().numpy()
+        return self.value().detach().clone().cpu().numpy()
         
     def to(self, device='cuda'):
         self.device = device
 
-        if self.fit_par:
-            self.val = nn.Parameter(self.val.detach().clone().to(device))
-        else:
-            self.val = self.val.to(device)
+        if self.use_heterogeneity:
+            if self.fit_par:
+                self.val_min = nn.Parameter(self.val_min.detach().clone().to(device))
+                self.val_scale = nn.Parameter(self.val_scale.detach().clone().to(device))
+            else:
+                self.val_min = self.val_min.to(device)
+                self.val_scale = self.val_scale.to(device)
 
-        if self.fit_hyper:
-            self.prior_mean = nn.Parameter(self.prior_mean.detach().clone().to(device))
-            self.prior_var = nn.Parameter(self.prior_var.detach().clone().to(device))
+            if self.fit_hyper:
+                self.prior_min_mean = nn.Parameter(self.prior_min_mean.detach().clone().to(device))
+                self.prior_min_var = nn.Parameter(self.prior_min_var.detach().clone().to(device))
+                self.prior_scale_mean = nn.Parameter(self.prior_scale_mean.detach().clone().to(device))
+                self.prior_scale_var = nn.Parameter(self.prior_scale_var.detach().clone().to(device))
+            else:
+                self.prior_min_mean = self.prior_min_mean.to(device)
+                self.prior_min_var = self.prior_min_var.to(device)
+                self.prior_scale_mean = self.prior_scale_mean.to(device)
+                self.prior_scale_var = self.prior_scale_var.to(device)
         else:
-            self.prior_mean = self.prior_mean.to(device)
-            self.prior_var = self.prior_var.to(device)
+            if self.fit_par:
+                self.val = nn.Parameter(self.val.detach().clone().to(device))
+            else:
+                self.val = self.val.to(device)
+
+            if self.fit_hyper:
+                self.prior_mean = nn.Parameter(self.prior_mean.detach().clone().to(device))
+                self.prior_var = nn.Parameter(self.prior_var.detach().clone().to(device))
+            else:
+                self.prior_mean = self.prior_mean.to(device)
+                self.prior_var = self.prior_var.to(device)
 
     def randSet(self):
         '''
         This method sets the initial value using the mean and variance of the priors.
         '''
 
-        if self.has_prior:
-            self.var = self.prior_mean.detach() + self.prior_var.detach() * torch.randn(1, device=self.device)
-            if self.fit_par:
-                self.val = torch.nn.parameter.Parameter(self.val)
+        if self.use_heterogeneity:
+            if self.has_prior:
+                self.val_min = self.prior_min_mean.detach() + self.prior_min_var.detach() * torch.randn(1, device=self.device)
+                self.val_scale = self.prior_scale_mean.detach() + self.prior_scale_var.detach() * torch.randn(1, device=self.device)
+                if self.fit_par:
+                    self.val_min = nn.Parameter(self.val_min)
+                    self.val_scale = nn.Parameter(self.val_scale)
+            else:
+                raise ValueError("must have priors provided at par object initialization to use this method")
         else:
-            raise ValueError("must have priors provided at par object initialization to use this method")
-        
+            if self.has_prior:
+                self.var = self.prior_mean.detach() + self.prior_var.detach() * torch.randn(1, device=self.device)
+                if self.fit_par:
+                    self.val = torch.nn.parameter.Parameter(self.val)
+            else:
+                raise ValueError("must have priors provided at par object initialization to use this method")
+
     def __pos__(self):
-        if self.asLog:
-            return torch.exp(self.val)
-        else:
-            return self.val
+        return self.value()
 
     def __neg__(self):
-        if self.asLog:
-            return -torch.exp(self.val)
-        else:
-            return -self.val
+        return -self.value()
 
     def __add__(self, num):
-        if self.asLog:
-            return torch.exp(self.val) + num
-        else:
-            return self.val + num
+        return self.value() + num
 
     def __radd__(self, num):
-        if self.asLog:
-            return num + torch.exp(self.val)
-        else:
-            return num + self.val
+        return num + self.value()
 
     def __sub__(self, num):
-        if self.asLog:
-            return torch.exp(self.val) - num
-        else:
-            return self.val - num
+        return self.value() - num
 
     def __rsub__(self, num):
-        if self.asLog:
-            return num - torch.exp(self.val)
-        else:
-            return num - self.val
+        return num - self.value()
 
     def __mul__(self, num):
-        if self.asLog:
-            return torch.exp(self.val) * num
-        else:
-            return self.val * num
+        return self.value() * num
 
     def __rmul__(self, num):
-        if self.asLog:
-            return num * torch.exp(self.val)
-        else:
-            return num * self.val
+        return num * self.value()
 
     def __truediv__(self, num):
-        if self.asLog:
-            return torch.exp(self.val) / num
-        else:
-            return self.val / num
+        return self.value() / num
 
     def __rtruediv__(self, num):
-        if self.asLog:
-            return num / torch.exp(self.val)
-        else:
-            return num / self.val
+        return num / self.value()
 
 class AbstractParams:
     def __init__(self, **kwargs):
@@ -244,7 +276,6 @@ class ParamsHP(AbstractParams):
 
         for var in kwargs:
             setattr(self, var, kwargs[var])
-
 
 class TrainingStats:
     '''
@@ -316,12 +347,28 @@ class TrainingStats:
         self.leadfield.append(newValue)
 
     def appendParam(self, newValues):
-        if (self.fit_params == {}):
-            for name in newValues.keys():
-                self.fit_params[name] = [newValues[name]]
+        '''
+        Append parameter values to the fit_params dictionary.
+        If a parameter uses heterogeneity, store the mean value or the entire tensor.
+
+        Parameters
+        -----------
+        newValues : Dict
+            A dictionary where keys are parameter names and values are the parameter values.
+        '''
+        if not self.fit_params:  # If fit_params is empty
+            for name, value in newValues.items():
+                if isinstance(value, torch.Tensor):
+                    self.fit_params[name] = [value.detach().clone().cpu().numpy()]
+                else:
+                    self.fit_params[name] = [value]
         else:
-            for name in newValues.keys():
-                self.fit_params[name].append(newValues[name])
+            for name, value in newValues.items():
+                if isinstance(value, torch.Tensor): 
+                    self.fit_params[name].append(value.detach().clone().cpu().numpy())
+                else:
+                    self.fit_params[name].append(value)
+        
 
 class AbstractNMM(torch.nn.Module):
     def __init__(self):
@@ -430,7 +477,6 @@ class CostsTS(AbstractLoss):
 
         else:
             raise ValueError(f"Invalid method '{method}'. Choose from 'mse', 'log_loss' and 'log_fro'.")
-
 
 class COVHOPF(AbstractNMM):
     """
@@ -551,26 +597,34 @@ class COVHOPF(AbstractNMM):
         var_names = [a for a in dir(self.params) if (type(getattr(self.params, a)) == par)]
         for var_name in var_names:
             var = getattr(self.params, var_name)
-            if (var.fit_hyper):
-                if var_name in ['lm', 'w_ll']:
-                    init_value = torch.normal(mean=var.prior_mean, std=torch.sqrt(var.prior_var)).to(self.device)
-                    var.val = nn.Parameter(init_value)
-                    param_hyper.append(var.prior_mean)
-                    param_hyper.append(var.prior_var)
-                elif (var != 'std_in'):
+            if var.use_heterogeneity:
+                if var.fit_hyper:
                     var.randSet()
-                    param_hyper.append(var.prior_mean)
-                    param_hyper.append(var.prior_var)
+                    param_hyper.extend([var.prior_min_mean, var.prior_min_var, var.prior_scale_mean, var.prior_scale_var])
+            else:
+                if var.fit_hyper:
+                    if var_name in ['lm', 'w_ll']:
+                    # Initialize with prior mean and variance
+                        init_value = torch.normal(mean=var.prior_mean, std=torch.sqrt(var.prior_var)).to(self.device)
+                        var.val = nn.Parameter(init_value)
+                        param_hyper.extend([var.prior_mean, var.prior_var])
+                    else:
+                        var.randSet()
+                        param_hyper.extend([var.prior_mean, var.prior_var])
+            
+            if var.use_heterogeneity:
+                if var.fit_par:
+                    param_reg.extend([var.val_min, var.val_scale])
+            else:
+                if var.fit_par:
+                    param_reg.append(var.val)
 
-            if (var.fit_par):
-                param_reg.append(var.val) 
-
-            if (var.fit_par | var.fit_hyper):
+            if var.fit_par or var.fit_hyper:
                 self.track_params.append(var_name)
 
             if var_name in ['lm', 'w_ll']:
                 setattr(self, var_name, var.val)
-
+                
         self.params_fitted = {'modelparameter': param_reg,'hyperparameter': param_hyper}
 
     def forward(self, freq_chunk_size=20, debug_sim=False):
@@ -592,10 +646,13 @@ class COVHOPF(AbstractNMM):
 
         # Extract model parameters and ensure they are on the same device
         a0 = -m(-self.params.a.value()).to(device)                  # Node's bifurcation parameter (s^-1)
-        a = a0 * torch.ones(n, device=device)
-        mean_omega = m(self.params.omega.value()).to(device)        # Intrinsic angular frequency (rad.s^-1)
-        sig_omega = (self.params.sig_omega.value()).to(device)      # Variance of the angular frequency
-        omega = m(torch.normal(mean=mean_omega.item(), std=sig_omega.item(), size=(n,))).to(device)
+        a = a0 * torch.ones(n, device=device) if a0.dim() == 0 else a0
+        if self.params.omega.use_heterogeneity:
+            omega = self.params.omega.value().to(device)
+        else:
+            mean_omega = m(self.params.omega.value()).to(device)        # Intrinsic angular frequency (rad.s^-1)
+            sig_omega = (self.params.sig_omega.value()).to(device)      # Variance of the angular frequency
+            omega = m(torch.normal(mean=mean_omega.item(), std=sig_omega.item(), size=(n,))).to(device)
 
         g = (lb * con_1 + m(self.params.g.value())).to(device)                      # Global Connectivity Scaling (s^-1)
         std_in = (noise_std_lb * con_1 + m(self.params.std_in.value())).to(device)  # White noise standard deviation
@@ -906,8 +963,14 @@ class Model_fitting(AbstractFitting):
                     if (var.fit_par):
                         trackedParam[par_name] = var.value().detach().cpu().numpy().copy()
                     if (var.fit_hyper):
-                        trackedParam[par_name + "_prior_mean"] = var.prior_mean.detach().cpu().numpy().copy()
-                        trackedParam[par_name + "_prior_var"] = var.prior_var.detach().cpu().numpy().copy()
+                        if var.use_heterogeneity:
+                            trackedParam[par_name + "_prior_min_mean"] = var.prior_min_mean.detach().cpu().numpy().copy()
+                            trackedParam[par_name + "_prior_min_var"] = var.prior_min_var.detach().cpu().numpy().copy()
+                            trackedParam[par_name + "_prior_scale_mean"] = var.prior_scale_mean.detach().cpu().numpy().copy()
+                            trackedParam[par_name + "_prior_scale_var"] = var.prior_scale_var.detach().cpu().numpy().copy()
+                        else:
+                            trackedParam[par_name + "_prior_mean"] = var.prior_mean.detach().cpu().numpy().copy()
+                            trackedParam[par_name + "_prior_var"] = var.prior_var.detach().cpu().numpy().copy()
             for key, value in self.model.state_dict().items():
                 if key not in exclude_param:
                     trackedParam[key] = value.detach().cpu().numpy().ravel().copy()
@@ -1051,10 +1114,13 @@ class Model_fitting(AbstractFitting):
         lb = 0.01         # lower bound of local gains
 
         a0 = -m(-self.model.params.a.value()).to(device)                  # Node's bifurcation parameter (s^-1)
-        a = a0 * torch.ones(n, device=device)
-        mean_omega = m(self.model.params.omega.value()).to(device)        # Intrinsic angular frequency (rad.s^-1)
-        sig_omega = (self.model.params.sig_omega.value()).to(device)      # Variance of the angular frequency
-        omega = m(torch.normal(mean=mean_omega.item(), std=sig_omega.item(), size=(n,))).to(device)
+        a = a0 * torch.ones(n, device=device) if a0.dim() == 0 else a0
+        if self.model.params.omega.use_heterogeneity:
+            omega = self.model.params.omega.value().to(device)
+        else:
+            mean_omega = m(self.model.params.omega.value()).to(device)        # Intrinsic angular frequency (rad.s^-1)
+            sig_omega = (self.model.params.sig_omega.value()).to(device)      # Variance of the angular frequency
+            omega = m(torch.normal(mean=mean_omega.item(), std=sig_omega.item(), size=(n,))).to(device)
 
         g = (lb * con_1 + m(self.model.params.g.value())).to(device)                      # Global Connectivity Scaling (s^-1)
         std_in = (noise_std_lb * con_1 + m(self.model.params.std_in.value())).to(device)  # White noise standard deviation
@@ -1167,28 +1233,56 @@ class CostsHP(AbstractLoss):
         variables_p = [a for a in dir(model.params) if (type(getattr(model.params, a)) == par)]
         for var_name in variables_p:
             var = getattr(model.params, var_name)
-        
-            # Prior loss terms
-            if var.has_prior and var_name not in ['std_in'] and \
-                        var_name not in exclude_param:
-                scale_factor = reg_scales.get(var_name, 1.0)
-                prior_loss = torch.sum(scale_factor * (lb + m(var.prior_var)) * 
-                           (m(var.val) - m(var.prior_mean)) ** 2) \
-                + torch.sum(-torch.log(lb + m(var.prior_var)))
-                loss_prior.append(prior_loss)
-                
-                # Print prior loss contribution for debugging
-                if debug_loss:
-                    print(f"Prior loss for {var_name}: {prior_loss.item()}")
 
-            # Regularization term for parameters without priors
-            if var_name not in exclude_param and not var.has_prior:
-                reg_loss = reg_lambda * torch.sum(var.val ** 2)  # L2 regularization
-                reg_term += reg_loss
-                
-                # Print regularization contribution
-                if debug_loss:
-                    print(f"  {var_name}: {reg_loss.item()}")
+            if var_name in exclude_param:
+                continue
+
+            if var.use_heterogeneity:
+                if var.has_prior:
+                    prior_loss_min = torch.sum(reg_scales.get(var_name, 1.0) * (lb + m(var.prior_min_var)) * 
+                                   (m(var.val_min) - m(var.prior_min_mean)) ** 2) \
+                                   + torch.sum(-torch.log(lb + m(var.prior_min_var)))
+                    
+                    # Prior loss for val_scale
+                    prior_loss_scale = torch.sum(reg_scales.get(var_name, 1.0) * (lb + m(var.prior_scale_var)) * 
+                                      (m(var.val_scale) - m(var.prior_scale_mean)) ** 2) \
+                                      + torch.sum(-torch.log(lb + m(var.prior_scale_var)))
+                    
+                    # Combine prior losses
+                    prior_loss = prior_loss_min + prior_loss_scale
+                    loss_prior.append(prior_loss)
+                    
+                    # Print prior loss contribution for debugging
+                    if debug_loss:
+                        print(f"Prior loss for {var_name} (heterogeneity): {prior_loss.item()}")
+                else:
+                    # Regularization for val_min and val_scale (no prior)
+                    reg_loss = reg_lambda * (torch.sum(var.val_min ** 2) + torch.sum(var.val_scale ** 2))
+                    reg_term += reg_loss
+                    
+                    # Print regularization contribution
+                    if debug_loss:
+                        print(f"  {var_name} (heterogeneity): {reg_loss.item()}")
+            else:
+                # Handle non-heterogeneity parameters
+                if var.has_prior:
+                    # Prior loss for non-heterogeneity parameters
+                    prior_loss = torch.sum(reg_scales.get(var_name, 1.0) * (lb + m(var.prior_var)) * 
+                                 (m(var.val) - m(var.prior_mean)) ** 2) \
+                                 + torch.sum(-torch.log(lb + m(var.prior_var)))
+                    loss_prior.append(prior_loss)
+                    
+                    # Print prior loss contribution for debugging
+                    if debug_loss:
+                        print(f"Prior loss for {var_name}: {prior_loss.item()}")
+                else:
+                    # Regularization for non-heterogeneity parameters (no prior)
+                    reg_loss = reg_lambda * torch.sum(var.val ** 2)
+                    reg_term += reg_loss
+                    
+                    # Print regularization contribution
+                    if debug_loss:
+                        print(f"  {var_name}: {reg_loss.item()}")
 
         # Summing up all contributions
         loss_prior_sum = sum(loss_prior)
@@ -1208,29 +1302,15 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     # Choose Subject
     subject_num = n_sub
 
-    repo_root = Path(__file__).resolve().parent
-
-    # Define the subfolders within your repo
-    struct_data_folder = repo_root / 'struct_data'
-    conn_data_folder = repo_root / 'conn_data'
-    eegtms_data_folder = repo_root / 'eegtms_data'
-
-    # Define the path to save the file
-    eeg_tms_file = eegtms_data_folder / 'Experiment_1.mat'
-
-    # If the file does not exist, download it from Google Drive
-    if not os.path.exists(eeg_tms_file):
-        print("EEG-TMS data not found. Downloading...")
-        # Google Drive file ID
-        file_id = '18fvsLjG1nmg43grW3dRpiXwEsRbYqRvS'
-        gdown.download(f'https://drive.google.com/uc?export=download&id={file_id}', str(eeg_tms_file), quiet=False)
-        print(f"Data downloaded to {eeg_tms_file}")
-    else:
-        print("EEG-TMS data already exists.")
-
     # Load data and layout information from .mat file
-    mat_data = scipy.io.loadmat(eeg_tms_file)
-    layout_mat_data = scipy.io.loadmat(eegtms_data_folder / 'chlocs_nexstim.mat')
+    mat_data = scipy.io.loadmat(folder_path +'/Experiment_1.mat')
+    layout_mat_data = scipy.io.loadmat(folder_path +'/chlocs_nexstim.mat')
+
+    # Load NeuroMaps
+    t1t2_map = np.load(neuro_path + 'T1T2_parc.npy')
+    T = erf(t1t2_map)
+    T_max, T_min = T.max(), T.min()
+    h_map = (T_max - T) / (T_max - T_min)
 
     n_channels = 60
     sampling_freq = 725  # in Hertz
@@ -1342,7 +1422,7 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
         empCOV = trainCOV
 
     # Load connectivity matrix
-    atlas = pd.read_csv(conn_data_folder / 'atlas_data.csv')
+    atlas = pd.read_csv(folder_path + 'atlas_data.csv')
     labels = atlas['ROI Name']
     coords = np.array([atlas['R'], atlas['A'], atlas['S']]).T
 
@@ -1351,12 +1431,12 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
         for roi2 in range(coords.shape[0]):
             dist[roi1, roi2] = np.sqrt(np.sum((coords[roi1, :] - coords[roi2, :]) ** 2, axis=0))
 
-    sc_file = conn_data_folder / 'Schaefer2018_200Parcels_7Networks_count.csv'
+    sc_file = folder_path + 'Schaefer2018_200Parcels_7Networks_count.csv'
     sc_df = pd.read_csv(sc_file, header=None, sep=' ')
     sc = sc_df.values
     sc = np.log1p(sc) / np.linalg.norm(np.log1p(sc))
 
-    fc_path = conn_data_folder / 'group_mean_fc.npy'
+    fc_path = '/home/veronese/Project/colab/FC/group_mean_fc.npy'
     group_fc = np.load(fc_path)
     fc_shifted = group_fc
     log_fc = np.log1p(fc_shifted)
@@ -1365,10 +1445,26 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     node_size = sc.shape[0]
     output_size = n_channels
 
-    lm_name = struct_data_folder / f'Subject{subject_num}_{train_region}_leadfield.npy'
+    lm_name = os.path.join(hopf_path, 'struct_data',f'Subject{subject_num}_{train_region}_leadfield.npy')
     lm0 = np.load(lm_name)
 
-    wll_name = struct_data_folder / f'Subject{subject_num}_{train_region}_wll.npy'
+    # Upload Starting Leadfield Matrix
+    #lm_regions = ['Prefrontal', 'Premotor']
+    #lm_sum = None
+    #lm_count = 0
+    #for r in lm_regions:
+    #    lm_name = os.path.join(hopf_path, 'struct_data', f'Subject{subject_num}_{r}_leadfield.npy')
+    #    lm_region = np.load(lm_name)
+    #    
+    #    if lm_sum is None:
+    #        lm_sum = np.zeros_like(lm_region)
+    #    
+    #    lm_sum += lm_region
+    #    lm_count += 1
+    #
+    #lm0 = lm_sum / lm_count
+
+    wll_name = os.path.join(hopf_path, 'struct_data', f'Subject{subject_num}_{train_region}_wll.npy')
     wll0 = np.load(wll_name)
 
     # Upload Starting w_ll
@@ -1406,8 +1502,18 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
 
     #wll0 = wll_sum / wll_count
 
+    # Initialize w_ll prior
+    #wll0 = np.zeros_like(sc)
+    #eps = 1e-6
+    #alpha = 0.5
+    #blended = alpha * fc + (1 - alpha) * sc
+    #wll0 = np.log(blended + eps)
+    #wll0 = fc.copy()
+
+
     freqs = np.linspace(1, 80, 1000, endpoint=False)
-    params = ParamsHP(a=par(-0.5,-0.5, 1/4, True, True), omega=par(omega0, omega0, 1/2, True, True),
+    params = ParamsHP(a=par(-0.5,(-0.5, 0.05), (1/4, 1/2), True, True, use_heterogeneity=True, h_map=h_map), 
+                    omega=par(omega0, (omega0, 0.05), (1/2, 1/2), True, True, use_heterogeneity=True, h_map=h_map),
                     sig_omega=par(sig_omega0, sig_omega0, 1/4, True, True),
                     g=par(500,500, 10, True, True), std_in= par(0.3, 0.3, 1, True, True),
                     v_d = par(1., 1., 0.4, True, True), cy0 = par(50, 50, 1, True, True),
@@ -1442,7 +1548,7 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     F.PSD()
 
     # Save fitting results to a file using pickle
-    store_filename = repo_root / 'Results' / f'Subject{subject_num}_{train_region}_{loss_method}_{sched_type}_FC_fitting_results.pkl'
+    store_filename = os.path.join(hopf_path, 'Results', f'Subject{subject_num}_{train_region}_{loss_method}_{sched_type}_hmaps_fitting_results.pkl')
     with open(store_filename, 'wb') as file:
         pickle.dump(F, file)
     print("Results successfully saved to the file.")
@@ -1458,6 +1564,5 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     print(f'Finished processing Subject {subject_num}, Region {train_region}')
 
 if __name__ == "__main__":
-    main(valFlag=True, train_region='Premotor', val_region='Prefrontal', test_region='Motor')
-    #main(n_sub = 1, train_region = 'Premotor')
-
+    #main(valFlag=True, train_region='Premotor', val_region='Prefrontal', test_region='Motor')
+    main(n_sub = 1, train_region = 'Premotor')
