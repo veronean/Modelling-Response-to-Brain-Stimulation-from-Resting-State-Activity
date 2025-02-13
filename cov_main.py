@@ -354,12 +354,18 @@ class TrainingStats:
         '''
         if not self.fit_params:  # If fit_params is empty
             for name, value in newValues.items():
+                # Skip sig_omega if omega is heterogeneous
+                if name == 'sig_omega' and self.model.parmas.omega.use_heterogeneity:
+                    continue
                 if isinstance(value, torch.Tensor):
                     self.fit_params[name] = [value.detach().clone().cpu().numpy()]
                 else:
                     self.fit_params[name] = [value]
         else:
             for name, value in newValues.items():
+                # Skip sig_omega if omega is heterogeneous
+                if name == 'sig_omega' and self.model.parmas.omega.use_heterogeneity:
+                    continue
                 if isinstance(value, torch.Tensor): 
                     self.fit_params[name].append(value.detach().clone().cpu().numpy())
                 else:
@@ -593,6 +599,11 @@ class COVHOPF(AbstractNMM):
         var_names = [a for a in dir(self.params) if (type(getattr(self.params, a)) == par)]
         for var_name in var_names:
             var = getattr(self.params, var_name)
+
+            # Skip sig_omega if omega is heterogeneous
+            if var_name == 'sig_omega' and self.params.omega.use_heterogeneity:
+                continue
+            
             if var.use_heterogeneity:
                 if var.fit_hyper:
                     var.randSet()
