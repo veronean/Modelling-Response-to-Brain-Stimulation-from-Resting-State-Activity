@@ -15,6 +15,8 @@ from scipy.special import erf
 import pathlib as Path
 
 warnings.filterwarnings('ignore')
+torch.cuda.empty_cache()
+torch.cuda.reset_accumulated_memory_stats()
 
 import sys
 
@@ -674,7 +676,8 @@ class COVHOPF(AbstractNMM):
 
         C = (w_n_l + dg_l)
         S = torch.sum(C, axis=1)
-        self.gamma = (torch.tensor(self.dist, dtype=torch.float32, device=device) / v_d)
+        self.gamma = (torch.tensor(self.dist, dtype=torch.float32, device=device) / (v_d) 
+                      if v_d.ndimension() == 0 else torch.tensor(self.dist, dtype=torch.float32, device=device) / (v_d[:, None]))
 
         # EEG computation (Leadfield Matrix)
         lm_t = (self.lm.T / torch.sqrt(self.lm ** 2).sum(1)).T
@@ -1141,7 +1144,8 @@ class Model_fitting(AbstractFitting):
 
         C = (w_n_l + dg_l)
         S = torch.sum(C, axis=1)
-        gamma = (torch.tensor(self.model.dist, dtype=torch.float32, device=device) / v_d)
+        gamma = (torch.tensor(self.dist, dtype=torch.float32, device=device) / (v_d) 
+                      if v_d.ndimension() == 0 else torch.tensor(self.dist, dtype=torch.float32, device=device) / (v_d[:, None]))
 
         # EEG computation (Leadfield Matrix)
         lm_t = (self.model.lm.T / torch.sqrt(self.model.lm ** 2).sum(1)).T
@@ -1525,12 +1529,13 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     #wll0 = np.log(blended + eps)
     #wll0 = fc.copy()
 
-    freqs = np.linspace(1, 80, 1000, endpoint=False)
-    params = ParamsHP(a=par(-0.5,(-0.5, 0.05), (1/4, 1/2), True, True, use_heterogeneity=True, h_map=h_map), 
-                    omega=par(omega0, (omega0, 0.05), (1/2, 1/2), True, True, use_heterogeneity=True, h_map=h_map),
+    freqs = np.linspace(1, 80, 800, endpoint=False)
+    params = ParamsHP(a=par(-0.5,(-0.5, 0.05), (1/4, 0.05), True, True, use_heterogeneity=True, h_map=h_map), 
+                    omega=par(omega0, (omega0, 0.05), (1/2, 0.05), True, True, use_heterogeneity=True, h_map=h_map),
                     sig_omega=par(sig_omega0, sig_omega0, 1/4, True, True),
                     g=par(500,500, 10, True, True), std_in= par(0.3, 0.3, 1, True, True),
-                    v_d = par(1., 1., 0.4, True, True), cy0 = par(50, 50, 1, True, True),
+                    v_d = par(1., (1., 0.05), (0.4, 0.05), True, True, use_heterogeneity=True, h_map=h_map), 
+                    cy0 = par(50, 50, 1, True, True),
                     lm=par(lm0), w_ll=par(wll0, wll0, np.ones_like(wll0), True, True))
 
     # Simulation start
