@@ -1241,6 +1241,9 @@ class CostsHP(AbstractLoss):
         for var_name in variables_p:
             var = getattr(model.params, var_name)
 
+            if var_name == 'sig_omega' and model.params.omega.use_heterogeneity:
+                continue
+
             if var_name in exclude_param:
                 continue
 
