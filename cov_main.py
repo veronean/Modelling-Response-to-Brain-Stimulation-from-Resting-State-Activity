@@ -437,47 +437,48 @@ class CostsTS(AbstractLoss):
 
     def loss(self, empData: torch.Tensor, simData: torch.Tensor, method: str = 'mse'):
         """
-        Computes the loss between simulated and empirical covariance matrices based on the specified method.
+        Computes loss between simulated and empirical covariance matrices. 
 
-        Parameters
-        ----------
-        simData: torch.Tensor
-            Simulated covariance matrix.
-        empData: torch.Tensor
-            Empirical covariance matrix.
-        method: str
-            The method to compute the loss. Options are:
-            - 'mse': Mean Squared Error.
-            - 'log_loss': Logarithmic Loss.
-            - 'log_fro': Log-domain Frobenius norm.
+        Loss methods:
+        - 'pearson': Pearson Correlation.
+        - 'mse': Mean Squared Error (Frobenius norm squared).
+        - 'log_loss': Logarithmic loss (log of Frobenius norm).
+        - 'log_fro': Log-domain Frobenius norm.
 
-        Returns
-        -------
-        loss: torch.Tensor
-            Computed loss value.
+        The loss is used to measure similarity or dissimilarity between covariance matrices.
         """
 
-        # Ensure precision compatibility for operations
         sim = simData
         emp = empData
 
-        if method == 'mse':
-            # Compute Mean Squared Error
-            mse = torch.norm(sim - emp, p='fro')**2
-            return mse
-        
+        if method == 'pearson':
+            eps = 1e-8  
+            sim = sim.flatten()
+            emp = emp.flatten()
+            
+            sim_mean = sim.mean()
+            emp_mean = emp.mean()
+            
+            sim_std = sim.std(unbiased=False)
+            emp_std = emp.std(unbiased=False)
+
+            pearson_corr = ((sim - sim_mean) * (emp - emp_mean)).mean() / (sim_std * emp_std + eps)
+            return -pearson_corr 
+
+        elif method == 'mse':
+            # Mean Squared Error (Frobenius norm squared)
+            return torch.norm(sim - emp, p='fro').pow(2) 
+
         elif method == 'log_loss':
-            # Compute Frobenius norm of the difference
-            frobenius_norm = torch.norm(sim - emp, p='fro')
-            log_value = torch.log(frobenius_norm + 1e-8)
-            return log_value
+            # Log Frobenius norm to dampen large differences
+            frobenius_norm = torch.norm(sim - emp, p='fro') + 1e-8 
+            return torch.log(frobenius_norm)
 
         elif method == 'log_fro':
-            # Log-domain Frobenius norm with stability checks
-            log_sim = torch.log(torch.clamp(sim, min=1e-8))
+            # Log-domain Frobenius norm (better handling of multiplicative differences)
+            log_sim = torch.log(torch.clamp(sim, min=1e-8)) 
             log_emp = torch.log(torch.clamp(emp, min=1e-8))
-            log_frobenius_norm = torch.norm(log_sim - log_emp, p='fro')
-            return log_frobenius_norm
+            return torch.norm(log_sim - log_emp, p='fro') 
 
         else:
             raise ValueError(f"Invalid method '{method}'. Choose from 'mse', 'log_loss' and 'log_fro'.")
