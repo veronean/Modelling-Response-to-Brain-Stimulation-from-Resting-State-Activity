@@ -1487,49 +1487,7 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     wll_name = struct_data_folder / f'Subject{subject_num}_{train_region}_wll.npy'
     wll0 = np.load(wll_name)
 
-    # Upload Starting w_ll
-    #wll_regions = ['Prefrontal', 'Premotor', 'Motor']
-    #wll_sum = None
-    #wll_count = 0
-    #for r in wll_regions:
-    #    wll_name = os.path.join(hopf_path, 'struct_data', f'Subject{subject_num}_{r}_wll.npy')
-    #    wll_region = np.load(wll_name)
-        
-    #    if wll_sum is None:
-    #        wll_sum = np.zeros_like(wll_region)
-        
-    #    wll_sum += wll_region
-    #    wll_count += 1
-    
-    #wll0 = wll_sum / wll_count
-
-    # w_ll mediated through regions and subjects
-    #wll_regions = ['Prefrontal', 'Premotor', 'Motor']
-
-    #wll_sum = None
-    #wll_count = 0
-
-    #for s in range(1, 7): 
-    #    for r in wll_regions:
-    #        wll_name = os.path.join(hopf_path, 'struct_data', f'Subject{s}_{r}_wll.npy')
-    #        wll_region = np.load(wll_name)
-
-    #        if wll_sum is None:
-    #            wll_sum = np.zeros_like(wll_region)
-    #        
-    #        wll_sum += wll_region
-    #        wll_count += 1
-
-    #wll0 = wll_sum / wll_count
-
-    # Initialize w_ll prior
-    #wll0 = np.zeros_like(sc)
-    #eps = 1e-6
-    #alpha = 0.5
-    #blended = alpha * fc + (1 - alpha) * sc
-    #wll0 = np.log(blended + eps)
-    #wll0 = fc.copy()
-
+    # Define the model parameters
     freqs = np.linspace(1, 80, 800, endpoint=False)
     params = ParamsHP(a=par(-0.5,(-0.5, 0.05), (1/4, 0.05), True, True, use_heterogeneity=True, h_map=h_map), 
                     omega=par(omega0, (omega0, 0.05), (1/2, 0.05), True, True, use_heterogeneity=True, h_map=h_map),
