@@ -1242,7 +1242,7 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     X, Y, Z = [np.ndarray(n_channels) for _ in range(3)]
 
     for i in range(n_channels):
-        X[i] = layout_mat_data['chlocs']['Y'][0][i][0]/10
+        X[i] = -layout_mat_data['chlocs']['Y'][0][i][0]/10
         Y[i] = layout_mat_data['chlocs']['X'][0][i][0]/10
         Z[i] = layout_mat_data['chlocs']['Z'][0][i][0]/10
 
