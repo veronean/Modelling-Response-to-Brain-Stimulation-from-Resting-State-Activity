@@ -946,11 +946,19 @@ class Model_fitting(AbstractFitting):
                     modelparameter_scheduler.step(loss.item())
 
             # Calculate Pseudo FC Correlation and Cosine Similarity
-            emp_flat = empCOV.detach().cpu().numpy().ravel()
-            sim_flat = simCOV.detach().cpu().numpy().ravel()
+            eps = 1e-8
+            empData = empCOV.detach().cpu().numpy()
+            simData = simCOV.detach().cpu().numpy()
 
-            pseudo_fc_cor = np.corrcoef(emp_flat, sim_flat)[0, 1]
-            cos_sim = cosine_similarity(emp_flat.reshape(1, -1), sim_flat.reshape(1, -1))[0, 0]
+            # Normalize using Frobenius norm (i.e., divide by the Frobenius norm of each matrix)
+            emp_norm = empData / (np.linalg.norm(empData, 'fro') + eps)
+            sim_norm = simData / (np.linalg.norm(simData, 'fro') + eps)
+
+            emp_flat = emp_norm.flatten().reshape(1, -1)
+            sim_flat = sim_norm.flatten().reshape(1, -1)
+
+            pseudo_fc_cor = np.corrcoef(emp_flat[0], sim_flat[0])[0, 1]
+            cos_sim = cosine_similarity(emp_flat, sim_flat)[0, 0]
 
             # Log metrics
             print(f"Pseudo FC Corr: {pseudo_fc_cor:.4f}")
@@ -1025,11 +1033,18 @@ class Model_fitting(AbstractFitting):
             simCOV = self.model(freq_chunk_size=20, debug_sim=False)
             loss = self.cost.loss(valCOV, simCOV, loss_method).to(device)
 
-            val_flat = valCOV.detach().cpu().numpy().ravel()
-            sim_flat = simCOV.detach().cpu().numpy().ravel()
+            eps = 1e-8
+            valData = valCOV.detach().cpu().numpy()
+            simData = simCOV.detach().cpu().numpy()
 
-            avg_corr = np.corrcoef(val_flat, sim_flat)[0, 1]
-            avg_cos_sim = cosine_similarity(val_flat.reshape(1, -1), sim_flat.reshape(1, -1))[0, 0]
+            val_norm = valData / (np.linalg.norm(valData, 'fro') + eps)
+            sim_norm = simData / (np.linalg.norm(simData, 'fro') + eps)
+
+            val_flat = val_norm.flatten().reshape(1, -1)
+            sim_flat = sim_norm.flatten().reshape(1, -1)
+
+            avg_corr = np.corrcoef(val_flat[0], sim_flat[0])[0, 1]
+            avg_cos_sim = cosine_similarity(val_flat, sim_flat)[0, 0]
 
         return loss.item(), avg_corr, avg_cos_sim
 
@@ -1061,17 +1076,18 @@ class Model_fitting(AbstractFitting):
             simCOV = self.model(freq_chunk_size=20, debug_sim=False)
             test_loss = self.cost.loss(testCOV, simCOV, loss_method).to(device)
 
-            # Flatten the covariance matrices for comparison
-            test_flat = testCOV.detach().cpu().numpy().ravel()
-            sim_flat = simCOV.detach().cpu().numpy().ravel()
+            eps = 1e-8
+            testData = testCOV.detach().cpu().numpy()
+            simData = simCOV.detach().cpu().numpy()
 
-            # Compute correlation
-            corr = np.corrcoef(test_flat, sim_flat)[0, 1]
+            test_norm = testData / (np.linalg.norm(testData, 'fro') + eps)
+            sim_norm = simData / (np.linalg.norm(simData, 'fro') + eps)
 
-            # Compute cosine similarity
-            cos_sim = np.dot(test_flat, sim_flat) / (
-                np.linalg.norm(test_flat) * np.linalg.norm(sim_flat)
-            )
+            test_flat = test_norm.flatten().reshape(1, -1)
+            sim_flat = sim_norm.flatten().reshape(1, -1)
+
+            corr = np.corrcoef(test_flat[0], sim_flat[0])[0, 1]
+            cos_sim = cosine_similarity(test_flat, sim_flat)[0, 0]
 
         # Save results to the attribute
         self.testStats = {
