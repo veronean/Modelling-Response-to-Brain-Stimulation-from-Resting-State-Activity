@@ -11,6 +11,7 @@ import os
 import gdown
 import pickle
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics import r2_score
 from pathlib import Path
 
 warnings.filterwarnings('ignore')
@@ -19,6 +20,22 @@ import sys
 
 #neuroimaging packages
 import mne
+
+def Scaler(pred, target, eps=1e-8):
+    """
+    Apply rescaling of the predicted values to match the norm of the target values.
+    This is useful when the model output is not scaled correctly.
+    """
+    if isinstance(pred, torch.Tensor) and isinstance(target, torch.Tensor):
+        norm_target = target.norm(p='fro')
+        rescaled_pred = pred * (norm_target / (pred.norm(p='fro') + eps))
+    elif isinstance(pred, np.ndarray) and isinstance(target, np.ndarray):
+        norm_target = np.linalg.norm(target, 'fro')
+        rescaled_pred = pred * (norm_target / (np.linalg.norm(pred, 'fro') + eps))
+    else:
+        raise TypeError("Both input arguments must be either PyTorch tensors or NumPy arrays, but not mixed.")
+    
+    return rescaled_pred
 
 # Suppression block
 class Suppressor:
@@ -32,7 +49,7 @@ class Suppressor:
     sys.stdout = self.stdout_original
 
 class par:
-    def __init__(self, val, prior_mean = None, prior_var = None, fit_par = False, fit_hyper = False, asLog = False, device='cuda'):
+    def __init__(self, val, prior_mean = None, prior_var = None, fit_par = False, fit_hyper = False, asLog = False, device='cuda' if torch.cuda.is_available() else 'cpu'):
         '''
         Parameters
         ----------
@@ -106,7 +123,7 @@ class par:
         else:
             return self.val.detach().clone().cpu().numpy()
         
-    def to(self, device='cuda'):
+    def to(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.device = device
 
         if self.fit_par:
@@ -231,7 +248,7 @@ class ParamsHP(AbstractParams):
             "a": par(-0.5),
             "omega": par(10.0),
             "sig_omega": par(3.0),
-            "g": par(500),
+            "g": par(5),
 
             "std_in": par(100),
 
@@ -342,14 +359,14 @@ class AbstractNMM(torch.nn.Module):
         pass
 
 class AbstractLoss:
-    def __init__(self, device = 'cuda'):
+    def __init__(self, device = 'cuda' if torch.cuda.is_available() else 'cpu'):
         self.device = device
 
     def loss(self, simData, empData, method):
         pass
 
 class AbstractFitting():
-    def __init__(self, model: AbstractNMM, cost: AbstractLoss, device = 'cuda'):
+    def __init__(self, model: AbstractNMM, cost: AbstractLoss, device = 'cuda' if torch.cuda.is_available() else 'cpu'):
         self.model = model
         self.cost = cost
         self.device = device
@@ -430,7 +447,8 @@ class CostsTS(AbstractLoss):
             return torch.norm(log_sim - log_emp, p='fro') 
 
         else:
-            raise ValueError(f"Invalid method '{method}'. Choose from 'pearson', 'mse', 'log_loss' and 'log_fro'.")
+            raise ValueError(f"Invalid method '{method}'. Choose from 'mse', 'log_loss' and 'log_fro'.")
+
 
 class COVHOPF(AbstractNMM):
     """
@@ -500,7 +518,7 @@ class COVHOPF(AbstractNMM):
         """
 
         super(COVHOPF, self).__init__()
-        self.device = 'cuda'
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.track_params = [] #Is populated during setModelParameters()
 
         self.tr = tr 
@@ -693,7 +711,7 @@ class Model_fitting(AbstractFitting):
         Whether the fitting is to run on CPU or GPU
     """
 
-    def __init__(self, model: AbstractNMM, cost: AbstractLoss, device='cuda'):
+    def __init__(self, model: AbstractNMM, cost: AbstractLoss, device='cuda'if torch.cuda.is_available() else 'cpu'):
         """
         Parameters
         ----------
@@ -728,7 +746,7 @@ class Model_fitting(AbstractFitting):
             pickle.dump(self, f)
 
     def train(self, empCOV: torch.Tensor, valCOV: torch.Tensor = None,
-              num_epochs: int = 120, learningrate: float = 0.01, lr_2ndLevel: float = 0.05, 
+              num_epochs: int = 120, learningrate: float = 0.05, lr_2ndLevel: float = 0.1, 
               lr_scheduler: bool = False, scheduler_type: str = 'ReduceLROnPlateau', loss_method: str = 'log_fro',
               run_val: bool = False, val_freq: int = 10,
               debug_loss: bool = False, debug_grad: bool = False):
@@ -760,9 +778,9 @@ class Model_fitting(AbstractFitting):
         """
         
         # Define two different optimizers for each group
-        modelparameter_optimizer = optim.Adam(self.model.params_fitted['modelparameter'], lr=learningrate, betas=(0.9, 0.999), eps=1e-8)
+        modelparameter_optimizer = optim.Adam(self.model.params_fitted['modelparameter'], lr=learningrate, betas=(0.9, 0.999), eps=1e-8, amsgrad=True)
         if 'hyperparameter' in self.model.params_fitted and self.model.params_fitted['hyperparameter']:
-            hyperparameter_optimizer = optim.Adam(self.model.params_fitted['hyperparameter'], lr=lr_2ndLevel, betas=(0.9, 0.999), eps=1e-8)
+            hyperparameter_optimizer = optim.Adam(self.model.params_fitted['hyperparameter'], lr=lr_2ndLevel, betas=(0.9, 0.999), eps=1e-8, amsgrad=True)
         else:
             hyperparameter_optimizer = None  # No hyperparameters
         
@@ -791,16 +809,16 @@ class Model_fitting(AbstractFitting):
                     hyperparameter_scheduler = optim.lr_scheduler.ReduceLROnPlateau(hyperparameter_optimizer,
                                                                                     mode='min',
                                                                                     factor=0.5,
-                                                                                    patience=5,
+                                                                                    patience=10,
                                                                                     verbose=True,
-                                                                                    min_lr=1e-5)
+                                                                                    min_lr=1e-4)
                     hlrs = []
                 modelparameter_scheduler = optim.lr_scheduler.ReduceLROnPlateau(modelparameter_optimizer, 
                                                                                 mode='min', 
                                                                                 factor=0.5, 
-                                                                                patience=5, 
+                                                                                patience=10, 
                                                                                 verbose=True, 
-                                                                                min_lr=1e-5)
+                                                                                min_lr=1e-4)
                 mlrs = []
             else:
                 raise ValueError("Unsupported scheduler type. Use 'OneCycleLR' or 'ReduceLROnPlateau'.")
@@ -834,12 +852,13 @@ class Model_fitting(AbstractFitting):
             # Perform validation
             if run_val and (epoch + 1) % val_freq == 0:
                 if valCOV is not None:
-                    val_loss, val_corr, val_cos_sim = self.validate(valCOV, loss_method)
+                    val_loss, val_corr, val_cos_sim, val_r2 = self.validate(valCOV, loss_method)
 
                     self.valStats[epoch + 1] = {
                         "loss": val_loss,
                         "corr": val_corr,
-                        "cosine_similarity": val_cos_sim
+                        "cosine_similarity": val_cos_sim,
+                        "r2": val_r2
                     }
                     print(f"Validation Loss: {val_loss:.6f}, Corr: {val_corr:.4f}, Cosine Sim: {val_cos_sim:.4f}")
                 else:
@@ -877,24 +896,27 @@ class Model_fitting(AbstractFitting):
                         hyperparameter_scheduler.step(loss.item())
                     modelparameter_scheduler.step(loss.item())
 
-            # Calculate Pseudo FC Correlation and Cosine Similarity
+            # Calculate Pseudo FC Correlation, Cosine Similarity and R2
             eps = 1e-8
             empData = empCOV.detach().cpu().numpy()
             simData = simCOV.detach().cpu().numpy()
 
-            # Normalize using Frobenius norm (i.e., divide by the Frobenius norm of each matrix)
             emp_norm = empData / (np.linalg.norm(empData, 'fro') + eps)
             sim_norm = simData / (np.linalg.norm(simData, 'fro') + eps)
 
+            sim_rescaled = Scaler(pred=sim_norm, target=emp_norm)
+
             emp_flat = emp_norm.flatten().reshape(1, -1)
-            sim_flat = sim_norm.flatten().reshape(1, -1)
+            sim_flat = sim_rescaled.flatten().reshape(1, -1)
 
             pseudo_fc_cor = np.corrcoef(emp_flat[0], sim_flat[0])[0, 1]
             cos_sim = cosine_similarity(emp_flat, sim_flat)[0, 0]
+            r2 = r2_score(emp_flat[0], sim_flat[0])
 
             # Log metrics
             print(f"Pseudo FC Corr: {pseudo_fc_cor:.4f}")
             print(f"cos_sim: {cos_sim:.4f}")
+            print(f"R²: {r2:.4f}")
 
             if lr_scheduler:
                 for param_group in modelparameter_optimizer.param_groups:
@@ -929,7 +951,7 @@ class Model_fitting(AbstractFitting):
             
         # Save the last optimized covariance matrix
         self.lastRec = {}
-        self.lastRec["simCOV"] = simCOV.detach().cpu().numpy()
+        self.lastRec["simCOV"] = sim_rescaled
 
     def validate(self, valCOV: torch.Tensor, loss_method: str = 'log_fro'):
         """
@@ -966,13 +988,16 @@ class Model_fitting(AbstractFitting):
             val_norm = valData / (np.linalg.norm(valData, 'fro') + eps)
             sim_norm = simData / (np.linalg.norm(simData, 'fro') + eps)
 
+            sim_rescaled = Scaler(pred=sim_norm, target=val_norm)
+
             val_flat = val_norm.flatten().reshape(1, -1)
-            sim_flat = sim_norm.flatten().reshape(1, -1)
+            sim_flat = sim_rescaled.flatten().reshape(1, -1)
 
             avg_corr = np.corrcoef(val_flat[0], sim_flat[0])[0, 1]
             avg_cos_sim = cosine_similarity(val_flat, sim_flat)[0, 0]
+            r2 = r2_score(val_flat[0], sim_flat[0])
 
-        return loss.item(), avg_corr, avg_cos_sim
+        return loss.item(), avg_corr, avg_cos_sim, r2
 
     def test(self, testCOV: torch.Tensor, loss_method: str = 'log_fro'):
         """
@@ -1009,22 +1034,26 @@ class Model_fitting(AbstractFitting):
             test_norm = testData / (np.linalg.norm(testData, 'fro') + eps)
             sim_norm = simData / (np.linalg.norm(simData, 'fro') + eps)
 
+            sim_rescaled = Scaler(pred=sim_norm, target=test_norm)
+
             test_flat = test_norm.flatten().reshape(1, -1)
-            sim_flat = sim_norm.flatten().reshape(1, -1)
+            sim_flat = sim_rescaled.flatten().reshape(1, -1)
 
             corr = np.corrcoef(test_flat[0], sim_flat[0])[0, 1]
             cos_sim = cosine_similarity(test_flat, sim_flat)[0, 0]
+            r2 = r2_score(test_flat[0], sim_flat[0])
 
         # Save results to the attribute
         self.testStats = {
             "test_loss": test_loss.item(),
             "correlation": corr,
-            "cosine_similarity": cos_sim
+            "cosine_similarity": cos_sim,
+            "r2": r2
         }
 
         print(f"Test Loss: {test_loss.item():.6f}, Correlation: {corr:.4f}, Cosine Sim: {cos_sim:.4f}")
 
-    def simulate(self, freq_chunk_size=20, debug_sim=False):
+    def simulate(self, empCOV: torch.Tensor, freq_chunk_size=20, debug_sim=False):
         """
         Simulate data using the model without optimization.
 
@@ -1042,11 +1071,18 @@ class Model_fitting(AbstractFitting):
         with torch.no_grad():
             simCOV = self.model(freq_chunk_size=freq_chunk_size, debug_sim=debug_sim)
 
+        eps = 1e-8
+        sim = simCOV / (simCOV.norm(p='fro') + eps)
+        emp = empCOV / (empCOV.norm(p='fro') + eps)
+
+        sim_rescaled = Scaler(pred=sim, target=emp)
+
         self.sim = {
-            "COV": simCOV.detach().cpu().numpy()
+            "simCOV": sim_rescaled.detach().cpu().numpy(),
+            "empCOV": empCOV.detach().cpu().numpy()
         }
 
-        print("Simulation completed. Covariance matrix saved in '.sim['COV']'.")
+        print("Simulation completed. Covariance matrix saved in '.sim['simCOV']'.")
 
     def PSD(self):
         '''
@@ -1149,6 +1185,8 @@ class CostsHP(AbstractLoss):
         sim = simData / (simData.norm(p='fro') + eps)
         emp = empData / (empData.norm(p='fro') + eps)
 
+        sim_rescaled = Scaler(pred=sim, target=emp)
+
         model = self.model
 
         # define some constants
@@ -1171,7 +1209,7 @@ class CostsHP(AbstractLoss):
         if not model.use_fit_lfm:
             exclude_param.append('lm')
         
-        loss_main = self.mainLoss.loss(emp, sim, method=loss_method)
+        loss_main = self.mainLoss.loss(emp, sim_rescaled, method=loss_method)
         # Print main loss contribution
         if debug_loss:
             print(f"Loss Main ({loss_method}): {loss_main.item()}")
