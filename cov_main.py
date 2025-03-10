@@ -12,6 +12,7 @@ import pickle
 import gdown
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.special import erf
+from sklearn.metrics import r2_score
 import pathlib as Path
 
 warnings.filterwarnings('ignore')
@@ -22,6 +23,22 @@ import sys
 
 #neuroimaging packages
 import mne
+
+def Scaler(pred, target, eps=1e-8):
+    """
+    Apply rescaling of the predicted values to match the norm of the target values.
+    This is useful when the model output is not scaled correctly.
+    """
+    if isinstance(pred, torch.Tensor) and isinstance(target, torch.Tensor):
+        norm_target = target.norm(p='fro')
+        rescaled_pred = pred * (norm_target / (pred.norm(p='fro') + eps))
+    elif isinstance(pred, np.ndarray) and isinstance(target, np.ndarray):
+        norm_target = np.linalg.norm(target, 'fro')
+        rescaled_pred = pred * (norm_target / (np.linalg.norm(pred, 'fro') + eps))
+    else:
+        raise TypeError("Both input arguments must be either PyTorch tensors or NumPy arrays, but not mixed.")
+    
+    return rescaled_pred
 
 # Suppression block
 class Suppressor:
@@ -902,12 +919,13 @@ class Model_fitting(AbstractFitting):
             # Perform validation
             if run_val and (epoch + 1) % val_freq == 0:
                 if valCOV is not None:
-                    val_loss, val_corr, val_cos_sim = self.validate(valCOV, loss_method)
+                    val_loss, val_corr, val_cos_sim, val_r2 = self.validate(valCOV, loss_method)
 
                     self.valStats[epoch + 1] = {
                         "loss": val_loss,
                         "corr": val_corr,
-                        "cosine_similarity": val_cos_sim
+                        "cosine_similarity": val_cos_sim,
+                        "r2": val_r2
                     }
                     print(f"Validation Loss: {val_loss:.6f}, Corr: {val_corr:.4f}, Cosine Sim: {val_cos_sim:.4f}")
                 else:
@@ -954,15 +972,19 @@ class Model_fitting(AbstractFitting):
             emp_norm = empData / (np.linalg.norm(empData, 'fro') + eps)
             sim_norm = simData / (np.linalg.norm(simData, 'fro') + eps)
 
+            sim_rescaled = Scaler(pred=sim_norm, target=emp_norm)
+
             emp_flat = emp_norm.flatten().reshape(1, -1)
-            sim_flat = sim_norm.flatten().reshape(1, -1)
+            sim_flat = sim_rescaled.flatten().reshape(1, -1)
 
             pseudo_fc_cor = np.corrcoef(emp_flat[0], sim_flat[0])[0, 1]
             cos_sim = cosine_similarity(emp_flat, sim_flat)[0, 0]
+            r2 = r2_score(emp_flat[0], sim_flat[0])
 
             # Log metrics
             print(f"Pseudo FC Corr: {pseudo_fc_cor:.4f}")
             print(f"cos_sim: {cos_sim:.4f}")
+            print(f"R²: {r2:.4f}")
 
             if lr_scheduler:
                 for param_group in modelparameter_optimizer.param_groups:
@@ -1003,7 +1025,7 @@ class Model_fitting(AbstractFitting):
             
         # Save the last optimized covariance matrix
         self.lastRec = {}
-        self.lastRec["simCOV"] = simCOV.detach().cpu().numpy()
+        self.lastRec["simCOV"] = sim_rescaled
 
     def validate(self, valCOV: torch.Tensor, loss_method: str = 'log_fro'):
         """
@@ -1040,13 +1062,16 @@ class Model_fitting(AbstractFitting):
             val_norm = valData / (np.linalg.norm(valData, 'fro') + eps)
             sim_norm = simData / (np.linalg.norm(simData, 'fro') + eps)
 
+            sim_rescaled = Scaler(pred=sim_norm, target=val_norm)
+
             val_flat = val_norm.flatten().reshape(1, -1)
-            sim_flat = sim_norm.flatten().reshape(1, -1)
+            sim_flat = sim_rescaled.flatten().reshape(1, -1)
 
             avg_corr = np.corrcoef(val_flat[0], sim_flat[0])[0, 1]
             avg_cos_sim = cosine_similarity(val_flat, sim_flat)[0, 0]
+            r2 = r2_score(val_flat[0], sim_flat[0])
 
-        return loss.item(), avg_corr, avg_cos_sim
+        return loss.item(), avg_corr, avg_cos_sim, r2
 
     def test(self, testCOV: torch.Tensor, loss_method: str = 'log_fro'):
         """
@@ -1083,22 +1108,26 @@ class Model_fitting(AbstractFitting):
             test_norm = testData / (np.linalg.norm(testData, 'fro') + eps)
             sim_norm = simData / (np.linalg.norm(simData, 'fro') + eps)
 
+            sim_rescaled = Scaler(pred=sim_norm, target=test_norm)
+
             test_flat = test_norm.flatten().reshape(1, -1)
-            sim_flat = sim_norm.flatten().reshape(1, -1)
+            sim_flat = sim_rescaled.flatten().reshape(1, -1)
 
             corr = np.corrcoef(test_flat[0], sim_flat[0])[0, 1]
             cos_sim = cosine_similarity(test_flat, sim_flat)[0, 0]
+            r2 = r2_score(test_flat[0], sim_flat[0])
 
         # Save results to the attribute
         self.testStats = {
             "test_loss": test_loss.item(),
             "correlation": corr,
-            "cosine_similarity": cos_sim
+            "cosine_similarity": cos_sim,
+            "r2": r2
         }
 
         print(f"Test Loss: {test_loss.item():.6f}, Correlation: {corr:.4f}, Cosine Sim: {cos_sim:.4f}")
 
-    def simulate(self, freq_chunk_size=20, debug_sim=False):
+    def simulate(self, empCOV: torch.Tensor, freq_chunk_size=20, debug_sim=False):
         """
         Simulate data using the model without optimization.
 
@@ -1116,11 +1145,18 @@ class Model_fitting(AbstractFitting):
         with torch.no_grad():
             simCOV = self.model(freq_chunk_size=freq_chunk_size, debug_sim=debug_sim)
 
+        eps = 1e-8
+        sim = simCOV / (simCOV.norm(p='fro') + eps)
+        emp = empCOV / (empCOV.norm(p='fro') + eps)
+
+        sim_rescaled = Scaler(pred=sim, target=emp)
+
         self.sim = {
-            "COV": simCOV.detach().cpu().numpy()
+            "simCOV": sim_rescaled.detach().cpu().numpy(),
+            "empCOV": empCOV.detach().cpu().numpy()
         }
 
-        print("Simulation completed. Covariance matrix saved in '.sim['COV']'.")
+        print("Simulation completed. Covariance matrix saved in '.sim['simCOV']'.")
 
     def PSD(self):
         '''
@@ -1227,6 +1263,8 @@ class CostsHP(AbstractLoss):
         sim = simData / (simData.norm(p='fro') + eps)
         emp = empData / (empData.norm(p='fro') + eps)
 
+        sim_rescaled = Scaler(pred=sim, target=emp)
+
         model = self.model
 
         # define some constants
@@ -1249,7 +1287,7 @@ class CostsHP(AbstractLoss):
         if not model.use_fit_lfm:
             exclude_param.append('lm')
         
-        loss_main = self.mainLoss.loss(emp, sim, method=loss_method)
+        loss_main = self.mainLoss.loss(emp, sim_rescaled, method=loss_method)
         # Print main loss contribution
         if debug_loss:
             print(f"Loss Main ({loss_method}): {loss_main.item()}")
@@ -1537,7 +1575,7 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
         F.test(testCOV = testCOV, loss_method = loss_method)
 
     # Simulate the model after training
-    F.simulate()
+    F.simulate(empCOV = empCOV)
     # Compute the PSD with the optimized parameters
     F.PSD()
 
