@@ -702,7 +702,7 @@ class COVHOPF(AbstractNMM):
         self.lm_t = (lm_t - 1 / n_ch * torch.matmul(torch.ones((1,n_ch), device=device), lm_t))
 
         Bxx = torch.diag(a - g * S)
-        Bxy = torch.diag(omega)
+        Bxy = torch.diag(2 * torch.pi * omega)
         B = torch.zeros(2 * n, 2 * n, dtype=torch.float32, device=device)
         B[:n, :n] = Bxx
         B[:n, n:] = Bxy
@@ -1205,7 +1205,7 @@ class Model_fitting(AbstractFitting):
         lm_t = (lm_t - 1 / n_ch * torch.matmul(torch.ones((1,n_ch), device=device), lm_t))
 
         Bxx = torch.diag(a - g * S)
-        Bxy = torch.diag(omega)
+        Bxy = torch.diag(2 * torch.pi * omega)
         B = torch.zeros(2 * n, 2 * n, dtype=torch.float32, device=device)
         B[:n, :n] = Bxx
         B[:n, n:] = Bxy
