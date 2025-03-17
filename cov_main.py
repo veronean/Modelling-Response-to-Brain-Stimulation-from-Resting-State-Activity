@@ -688,7 +688,7 @@ class COVHOPF(AbstractNMM):
 
         # Update the Laplacian based on the updated connection gains w_ll.
         w_l = torch.exp(self.w_ll) * torch.tensor(self.sc, dtype=torch.float32, device=device)
-        w_n_l = (0.5 * (w_l + torch.transpose(w_l, 0, 1))) / torch.linalg.norm(0.5 * (w_l + torch.transpose(w_l, 0, 1)))
+        w_n_l = w_l / torch.linalg.norm(w_l)
         self.sc_fitted = w_n_l
         dg_l = -torch.diag(torch.sum(w_n_l, dim=1))
 
@@ -1192,7 +1192,7 @@ class Model_fitting(AbstractFitting):
 
         # Update the Laplacian based on the updated connection gains w_ll.
         w_l = torch.exp(self.model.w_ll) * torch.tensor(self.model.sc, dtype=torch.float32, device=device)
-        w_n_l = (0.5 * (w_l + torch.transpose(w_l, 0, 1))) / torch.linalg.norm(0.5 * (w_l + torch.transpose(w_l, 0, 1)))
+        w_n_l = w_l / torch.linalg.norm(w_l)
         dg_l = -torch.diag(torch.sum(w_n_l, dim=1))
 
         C = (w_n_l + dg_l)
