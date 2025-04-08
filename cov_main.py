@@ -283,7 +283,7 @@ class TrainingStats:
         A list of connectivity values over training.
     leadfield : List
         A list of leadfield matrices over training.
-    w_ll : List
+    wll : List
         A list of connection gain matrices over training.
     fit_params : Dict
         A dictionary of lists where the key is the parameter name and the value is the list of parameter values over training.
@@ -302,7 +302,7 @@ class TrainingStats:
         self.loss = []
 
         self.connectivity = []
-        self.w_ll = []
+        self.wll = []
         self.leadfield = []
 
         self.fit_params = {}
@@ -315,7 +315,7 @@ class TrainingStats:
         self.loss = []
 
         self.connectivity = []
-        self.w_ll = []
+        self.wll = []
         self.leadfield = []
         
         self.fit_params = {}
@@ -327,7 +327,7 @@ class TrainingStats:
         self.connectivity.append(newValue)
 
     def appendWll(self, newValue):
-        self.w_ll.append(newValue)
+        self.wll.append(newValue)
 
     def appendLF(self, newValue):
         self.leadfield.append(newValue)
@@ -472,7 +472,7 @@ class COVHOPF(AbstractNMM):
         Parameters of the model
     lm: ndarray of floats
         Leadfield matrix from source space to EEG space
-    w_ll_init: ndarray of floats
+    wll_init: ndarray of floats
         Connection gain matrix (for effective connectivity)
     use_fit_gains: bool
         Flag for fitting gains. 1: fit, 0: not fit
@@ -487,7 +487,7 @@ class COVHOPF(AbstractNMM):
     """
     def __init__(self, node_size: int,
                 output_size: int, tr: float, sc: np.ndarray, dist: np.ndarray, freqs: np.ndarray, 
-                params: ParamsHP, lm: np.ndarray, w_ll_init: np.ndarray = None,
+                params: ParamsHP, lm: np.ndarray, wll_init: np.ndarray = None,
                 use_fit_gains: bool = True, use_fit_lfm: bool = True) -> None:
         
         """
@@ -532,11 +532,11 @@ class COVHOPF(AbstractNMM):
         self.use_fit_lfm = use_fit_lfm      # flag for fitting leadfield matrix
         self.params = params
 
-        if w_ll_init is None:
-            w_ll_init = np.zeros((self.node_size, self.node_size)) + 0.05
-            print("w_ll_init not provided, using default initialization for w_ll.")
+        if wll_init is None:
+            wll_init = np.zeros((self.node_size, self.node_size)) + 0.05
+            print("wll_init not provided, using default initialization for wll.")
         
-        self.w_ll = w_ll_init
+        self.wll = wll_init
 
         self.setModelParameters()
 
@@ -548,14 +548,14 @@ class COVHOPF(AbstractNMM):
         param_reg = []
         param_hyper = []
 
-        # Set w_ll as attributes as type Parameter if use_fit_gains is True
+        # Set wll as attributes as type Parameter if use_fit_gains is True
         if self.use_fit_gains:
-            self.w_ll = nn.Parameter(torch.tensor(self.w_ll, dtype=torch.float32, device=self.device))
-            param_reg.append(self.w_ll)
-            print("Fitting gains: w_ll is set as a Parameter.")
+            self.wll = nn.Parameter(torch.tensor(self.wll, dtype=torch.float32, device=self.device))
+            param_reg.append(self.wll)
+            print("Fitting gains: wll is set as a Parameter.")
         else:
-            self.w_ll = torch.tensor(self.w_ll, dtype=torch.float32, device=self.device)
-            print("NOT fitting gains: w_ll is a fixed tensor.")
+            self.wll = torch.tensor(self.wll, dtype=torch.float32, device=self.device)
+            print("NOT fitting gains: wll is a fixed tensor.")
 
         # If use_fit_lfm is True, set lm as an attribute as type Parameter (containing variance information)
         if self.use_fit_lfm:
@@ -570,7 +570,7 @@ class COVHOPF(AbstractNMM):
         for var_name in var_names:
             var = getattr(self.params, var_name)
             if (var.fit_hyper):
-                if var_name in ['lm', 'w_ll']:
+                if var_name in ['lm', 'wll']:
                     init_value = torch.normal(mean=var.prior_mean, std=torch.sqrt(var.prior_var)).to(self.device)
                     var.val = nn.Parameter(init_value)
                     param_hyper.append(var.prior_mean)
@@ -586,7 +586,7 @@ class COVHOPF(AbstractNMM):
             if (var.fit_par | var.fit_hyper):
                 self.track_params.append(var_name)
 
-            if var_name in ['lm', 'w_ll']:
+            if var_name in ['lm', 'wll']:
                 setattr(self, var_name, var.val)
 
         self.params_fitted = {'modelparameter': param_reg,'hyperparameter': param_hyper}
@@ -620,8 +620,8 @@ class COVHOPF(AbstractNMM):
         v_d = (conduct_lb * con_1 + m(self.params.v_d.value())).to(device)          # Conduction Velocity (or its inverse i don't remember)
         cy0 = self.params.cy0.value().to(device)                                    # Leadfield Matrix Scaling Parameter
 
-        # Update the Laplacian based on the updated connection gains w_ll.
-        w_l = torch.exp(self.w_ll) * torch.tensor(self.sc, dtype=torch.float32, device=device)
+        # Update the Laplacian based on the updated connection gains wll.
+        w_l = torch.exp(self.wll) * torch.tensor(self.sc, dtype=torch.float32, device=device)
         w_n_l = w_l / torch.linalg.norm(w_l)
         self.sc_fitted = w_n_l
         dg_l = -torch.diag(torch.sum(w_n_l, dim=1))
@@ -746,7 +746,7 @@ class Model_fitting(AbstractFitting):
             pickle.dump(self, f)
 
     def train(self, empCOV: torch.Tensor, valCOV: torch.Tensor = None,
-              num_epochs: int = 120, learningrate: float = 0.05, lr_2ndLevel: float = 0.1, 
+              num_epochs: int = 120, learningrate: float = 0.05, lr_2ndLevel: float = 0.05, 
               lr_scheduler: bool = False, scheduler_type: str = 'ReduceLROnPlateau', loss_method: str = 'log_fro',
               run_val: bool = False, val_freq: int = 10,
               debug_loss: bool = False, debug_grad: bool = False):
@@ -778,9 +778,11 @@ class Model_fitting(AbstractFitting):
         """
         
         # Define two different optimizers for each group
-        modelparameter_optimizer = optim.Adam(self.model.params_fitted['modelparameter'], lr=learningrate, betas=(0.9, 0.999), eps=1e-8, amsgrad=True)
+        modelparameter_optimizer = optim.Adam(self.model.params_fitted['modelparameter'], 
+                                              lr=learningrate, betas=(0.9, 0.999), eps=1e-8, amsgrad=True)
         if 'hyperparameter' in self.model.params_fitted and self.model.params_fitted['hyperparameter']:
-            hyperparameter_optimizer = optim.Adam(self.model.params_fitted['hyperparameter'], lr=lr_2ndLevel, betas=(0.9, 0.999), eps=1e-8, amsgrad=True)
+            hyperparameter_optimizer = optim.Adam(self.model.params_fitted['hyperparameter'], 
+                                                  lr=lr_2ndLevel, betas=(0.9, 0.999), eps=1e-8, amsgrad=True)
         else:
             hyperparameter_optimizer = None  # No hyperparameters
         
@@ -809,16 +811,16 @@ class Model_fitting(AbstractFitting):
                     hyperparameter_scheduler = optim.lr_scheduler.ReduceLROnPlateau(hyperparameter_optimizer,
                                                                                     mode='min',
                                                                                     factor=0.5,
-                                                                                    patience=10,
+                                                                                    patience=5,
                                                                                     verbose=True,
-                                                                                    min_lr=1e-4)
+                                                                                    min_lr=1e-5)
                     hlrs = []
                 modelparameter_scheduler = optim.lr_scheduler.ReduceLROnPlateau(modelparameter_optimizer, 
                                                                                 mode='min', 
                                                                                 factor=0.5, 
-                                                                                patience=10, 
+                                                                                patience=5, 
                                                                                 verbose=True, 
-                                                                                min_lr=1e-4)
+                                                                                min_lr=1e-5)
                 mlrs = []
             else:
                 raise ValueError("Unsupported scheduler type. Use 'OneCycleLR' or 'ReduceLROnPlateau'.")
@@ -870,9 +872,9 @@ class Model_fitting(AbstractFitting):
             scaler.update()
 
             if debug_grad:
-                if hasattr(self.model.params.w_ll.val, 'grad') and self.model.params.w_ll.val.grad is not None:
-                    wll_grads = self.model.params.w_ll.val.grad
-                    print(f"Gradients for w_ll: {wll_grads}")
+                if hasattr(self.model.params.wll.val, 'grad') and self.model.params.wll.val.grad is not None:
+                    wll_grads = self.model.params.wll.val.grad
+                    print(f"Gradients for wll: {wll_grads}")
                     print(f"Mean Gradient: {wll_grads.mean().item()}")
                     print(f"Max Gradient: {wll_grads.max().item()}")
                     print(f"Min Gradient: {wll_grads.min().item()}")
@@ -929,7 +931,7 @@ class Model_fitting(AbstractFitting):
 
             # Parameter info for the Epoch
             trackedParam = {}
-            exclude_param = ['w_ll', 'gains_con', 'lm'] #This stores SC and LF which are saved seperately
+            exclude_param = ['wll', 'gains_con', 'lm'] #This stores SC and LF which are saved seperately
             if(self.model.track_params):
                 for par_name in self.model.track_params:
                     var = getattr(self.model.params, par_name)
@@ -944,7 +946,7 @@ class Model_fitting(AbstractFitting):
             self.trainingStats.appendParam(trackedParam)
             # Saving the SC and/or Lead Field State at Every Epoch
             if self.model.use_fit_gains:
-                self.trainingStats.appendWll(self.model.w_ll.detach().cpu().numpy())
+                self.trainingStats.appendWll(self.model.wll.detach().cpu().numpy())
                 self.trainingStats.appendCONN(self.model.sc_fitted.detach().cpu().numpy())
             if self.model.use_fit_lfm:
                 self.trainingStats.appendLF(self.model.lm.detach().cpu().numpy())
@@ -1113,8 +1115,8 @@ class Model_fitting(AbstractFitting):
         v_d = (conduct_lb * con_1 + m(self.model.params.v_d.value())).to(device)          # Conduction Velocity (or its inverse i don't remember)
         cy0 = self.model.params.cy0.value().to(device)                                    # Leadfield Matrix Scaling Parameter
 
-        # Update the Laplacian based on the updated connection gains w_ll.
-        w_l = torch.exp(self.model.w_ll) * torch.tensor(self.model.sc, dtype=torch.float32, device=device)
+        # Update the Laplacian based on the updated connection gains wll.
+        w_l = torch.exp(self.model.wll) * torch.tensor(self.model.sc, dtype=torch.float32, device=device)
         w_n_l = w_l / torch.linalg.norm(w_l)
         dg_l = -torch.diag(torch.sum(w_n_l, dim=1))
 
@@ -1194,7 +1196,7 @@ class CostsHP(AbstractLoss):
         w_cost = 1.0
         reg_lambda = 0.01
         reg_scales = {
-            'w_ll': 1e-3,  
+            'wll': 1e-3,  
             'lm': 1e-2,     
         }
 
@@ -1203,7 +1205,7 @@ class CostsHP(AbstractLoss):
 
         exclude_param = []
         if not model.use_fit_gains:
-            exclude_param.append('w_ll')
+            exclude_param.append('wll')
             exclude_param.append('gains_con')
 
         if not model.use_fit_lfm:
@@ -1410,11 +1412,6 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     sc = sc_df.values
     sc = np.log1p(sc) / np.linalg.norm(np.log1p(sc))
 
-    fc_path = conn_data_folder / 'group_mean_fc.npy'
-    group_fc = np.load(fc_path)
-    fc_shifted = group_fc
-    log_fc = np.log1p(fc_shifted)
-    fc = log_fc / np.linalg.norm(log_fc)
 
     node_size = sc.shape[0]
     output_size = n_channels
@@ -1425,53 +1422,20 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     wll_name = struct_data_folder / f'Subject{subject_num}_{train_region}_wll.npy'
     wll0 = np.load(wll_name)
 
-    # Upload Starting w_ll
-    #wll_regions = ['Prefrontal', 'Premotor', 'Motor']
-    #wll_sum = None
-    #wll_count = 0
-    #for r in wll_regions:
-    #    wll_name = os.path.join(hopf_path, 'struct_data', f'Subject{subject_num}_{r}_wll.npy')
-    #    wll_region = np.load(wll_name)
-        
-    #    if wll_sum is None:
-    #        wll_sum = np.zeros_like(wll_region)
-        
-    #    wll_sum += wll_region
-    #    wll_count += 1
-    
-    #wll0 = wll_sum / wll_count
-
-    # w_ll mediated through regions and subjects
-    #wll_regions = ['Prefrontal', 'Premotor', 'Motor']
-
-    #wll_sum = None
-    #wll_count = 0
-
-    #for s in range(1, 7): 
-    #    for r in wll_regions:
-    #        wll_name = os.path.join(hopf_path, 'struct_data', f'Subject{s}_{r}_wll.npy')
-    #        wll_region = np.load(wll_name)
-
-    #        if wll_sum is None:
-    #            wll_sum = np.zeros_like(wll_region)
-    #        
-    #        wll_sum += wll_region
-    #        wll_count += 1
-
-    #wll0 = wll_sum / wll_count
 
     freqs = np.linspace(1, 80, 1000, endpoint=False)
-    params = ParamsHP(a=par(-0.5,-0.5, 1/4, True, True), omega=par(omega0, omega0, 1/2, True, True),
-                    sig_omega=par(sig_omega0, sig_omega0, 1/4, True, True),
+    params = ParamsHP(a=par(-0.5,-0.5, 1/4, True, True), omega=par(omega0, omega0, 0.5*omega0, True, True),
+                    sig_omega=par(sig_omega0, sig_omega0, 0.5*sig_omega0, True, True),
                     g=par(500,500, 10, True, True), std_in= par(0.3, 0.3, 1, True, True),
                     v_d = par(1., 1., 0.4, True, True), cy0 = par(50, 50, 1, True, True),
-                    lm=par(lm0), w_ll=par(wll0, wll0, np.ones_like(wll0), True, True))
+                    lm=par(lm0), wll=par(wll0, wll0, 0.02*np.ones_like(wll0), True, True))
 
     # Simulation start
     n_epochs = 120
     start_time = time.time()
 
-    model = COVHOPF(node_size, output_size, sampling_freq, sc, dist, freqs, params, lm0, wll0, use_fit_gains=True, use_fit_lfm=False)
+    model = COVHOPF(node_size, output_size, sampling_freq, sc, dist, freqs, params, lm=lm0, wll_init=wll0, 
+                    use_fit_gains=True, use_fit_lfm=False)
     ObjFun = CostsHP(model)
     F = Model_fitting(model, ObjFun)
     scheds = {'O': 'OneCycleLR', 'R': 'ReduceLROnPlateau'}
@@ -1496,7 +1460,7 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     F.PSD()
 
     # Save fitting results to a file using pickle
-    store_filename = repo_root / 'Results' / f'Subject{subject_num}_{train_region}_{loss_method}_{sched_type}_FC_fitting_results.pkl'
+    store_filename = repo_root / 'Results' / f'Subject{subject_num}_{train_region}_{loss_method}_{sched_type}_fitting_results.pkl'
     with open(store_filename, 'wb') as file:
         pickle.dump(F, file)
     print("Results successfully saved to the file.")
@@ -1512,6 +1476,6 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
     print(f'Finished processing Subject {subject_num}, Region {train_region}')
 
 if __name__ == "__main__":
-    main(valFlag=True, train_region='Premotor', val_region='Prefrontal', test_region='Motor')
-    #main(n_sub = 1, train_region = 'Premotor')
+    #main(valFlag=True, train_region='Premotor', val_region='Prefrontal', test_region='Motor')
+    main(n_sub = 1, train_region = 'Premotor')
 
