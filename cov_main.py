@@ -3,23 +3,31 @@ import numpy as np
 import scipy.io
 import pandas as pd
 import torch
+import gdown
 import torch.optim as optim
+from torch.optim import Optimizer
 import torch.nn as nn
 import warnings
 import time
+import math
 import os
-import gdown
 import pickle
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import r2_score
-from pathlib import Path
 
 warnings.filterwarnings('ignore')
+torch.cuda.empty_cache()
+torch.cuda.reset_accumulated_memory_stats()
 
 import sys
+sys.path.append('/home/veronese/Project/colab/Hopf')
 
 #neuroimaging packages
 import mne
+
+dir_path = '/home/veronese/Project/colab/'
+folder_path = '/home/veronese/Project/colab/Modelling_JR/'
+hopf_path =  '/home/veronese/Project/colab/Hopf/'
 
 def Scaler(pred, target, eps=1e-8):
     """
@@ -47,6 +55,112 @@ class Suppressor:
   def __exit__(self, exc_type, exc_value, traceback):
     sys.stdout.close()
     sys.stdout = self.stdout_original
+
+
+class EntropyAdam(Optimizer):
+    def __init__(self, params, lr=0.05, betas=(0.9, 0.999), eps=1e-8,
+                 gamma=0.01, eta_prime=0.5, L=5, alpha=0.75, noise_scale=1e-3,
+                 verbose=False):
+        defaults = dict(lr=lr, betas=betas, eps=eps,
+                       gamma=gamma, eta_prime=eta_prime, L=L,
+                       alpha=alpha, noise_scale=noise_scale,
+                       verbose=verbose)
+        super().__init__(params, defaults)
+        
+        print("\nEntropyAdam Configuration:")
+        print(f"• Base LR (η): {lr:.4f} | Betas: {betas}")
+        print(f"• Entropy γ: {gamma:.4f} | SGLD η': {eta_prime:.4f}")
+        print(f"• Langevin Steps (L): {L} | EMA α: {alpha:.2f}")
+        print(f"• Noise Scale: {noise_scale:.1e} | Eps: {eps:.1e}\n")
+
+        for group in self.param_groups:
+            for p in group['params']:
+                state = self.state[p]
+                state['step'] = 0
+                state['mu'] = torch.clone(p.data)
+                state['m'] = torch.zeros_like(p.data)
+                state['v'] = torch.zeros_like(p.data)
+
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            if group['verbose']:
+                print(f"\nStep Hyperparams [LR={group['lr']:.4f}]:")
+                print(f"γ={group['gamma']:.4f} η'={group['eta_prime']:.4f} "
+                      f"L={group['L']} α={group['alpha']:.2f} "
+                      f"noise={group['noise_scale']:.1e}")
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                state = self.state[p]
+                
+                # --- SGLD Sampling ---
+                x_prime = p.data.clone().detach().requires_grad_(True)
+                
+                # Manually compute gradient if not provided by closure
+                if x_prime.grad is None:
+                    with torch.enable_grad():
+                        # Create dummy loss that depends on x_prime
+                        dummy_loss = (x_prime * p.grad).sum()
+                        dummy_loss.backward()
+                
+                for l_step in range(group['L']):
+                    if x_prime.grad is not None:
+                        x_prime.grad.zero_()
+                    
+                    # Recompute gradient if needed
+                    if x_prime.grad is None:
+                        with torch.enable_grad():
+                            dummy_loss = (x_prime * p.grad).sum()
+                            dummy_loss.backward()
+                    
+                    # Compute entropy gradient safely
+                    diff = p.data - x_prime
+                    g_entropy = x_prime.grad - group['gamma'] * diff
+                    
+                    # Stable noise calculation
+                    noise_std = math.sqrt(2 * group['eta_prime']) * group['noise_scale']
+                    noise = torch.randn_like(x_prime) * noise_std
+                    
+                    # Langevin update
+                    x_prime.data.add_(-group['eta_prime'] * g_entropy + noise)
+                    
+                    # Update EMA
+                    state['mu'].mul_(1 - group['alpha']).add_(x_prime.detach(), alpha=group['alpha'])
+
+                    if group['verbose'] and l_step == group['L'] - 1:
+                        print(f"  SGLD [Step {l_step+1}/{group['L']}]:")
+                        print(f"  |∇f|: {x_prime.grad.norm().item():.4f}")
+                        print(f"  |x-μ|: {diff.norm().item():.4f}")
+                        print(f"  Noise: {noise.norm().item():.2e}")
+
+                # --- Entropy Gradient ---
+                g_entropy = group['gamma'] * (p.data - state['mu'])
+                
+                # --- Adam Update ---
+                state['step'] += 1
+                beta1, beta2 = group['betas']
+                
+                state['m'].mul_(beta1).add_(g_entropy, alpha=1 - beta1)
+                state['v'].mul_(beta2).addcmul_(g_entropy, g_entropy, value=1 - beta2)
+                
+                m_hat = state['m'] / (1 - beta1 ** state['step'])
+                v_hat = state['v'] / (1 - beta2 ** state['step'])
+                
+                p.data.addcdiv_(m_hat, v_hat.sqrt().add(group['eps']), value=-group['lr'])
+
+                if group['verbose']:
+                    print(f"  Adam Update:")
+                    print(f"  Effective LR: {group['lr']/v_hat.sqrt().mean().item():.2e}")
+                    print(f"  |m̂/v̂|: {(m_hat/(v_hat.sqrt()+group['eps'])).norm().item():.2e}")
+
+        return loss
 
 class par:
     def __init__(self, val, prior_mean = None, prior_var = None, fit_par = False, fit_hyper = False, asLog = False, device='cuda' if torch.cuda.is_available() else 'cpu'):
@@ -382,6 +496,9 @@ class AbstractFitting():
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
 
+    def _debug_scope_gamma():
+        pass
+
     def train():
         pass
 
@@ -408,10 +525,8 @@ class CostsTS(AbstractLoss):
         Loss methods:
         - 'pearson': Pearson Correlation.
         - 'mse': Mean Squared Error (Frobenius norm squared).
-        - 'log_loss': Logarithmic loss (log of Frobenius norm).
         - 'log_fro': Log-domain Frobenius norm.
-
-        The loss is used to measure similarity or dissimilarity between covariance matrices.
+        - 'cross_entropy': Cross-Entropy loss (inputs will be softmax-normalized).
         """
 
         sim = simData
@@ -435,20 +550,19 @@ class CostsTS(AbstractLoss):
             # Mean Squared Error (Frobenius norm squared)
             return torch.norm(sim - emp, p='fro').pow(2) 
 
-        elif method == 'log_loss':
-            # Log Frobenius norm to dampen large differences
-            frobenius_norm = torch.norm(sim - emp, p='fro') + 1e-8 
-            return torch.log(frobenius_norm)
-
         elif method == 'log_fro':
             # Log-domain Frobenius norm (better handling of multiplicative differences)
             log_sim = torch.log(torch.clamp(sim, min=1e-8)) 
             log_emp = torch.log(torch.clamp(emp, min=1e-8))
-            return torch.norm(log_sim - log_emp, p='fro') 
+            return torch.norm(log_sim - log_emp, p='fro')
+            
+        elif method == 'cross_entropy':
+            # Assume inputs are already probabilities (softmax handled in CostsHP)
+            cross_entropy = -torch.sum(emp * torch.log(sim + 1e-8))
+            return cross_entropy
 
         else:
-            raise ValueError(f"Invalid method '{method}'. Choose from 'mse', 'log_loss' and 'log_fro'.")
-
+            raise ValueError(f"Invalid method '{method}'. Choose from 'mse', 'log_fro', or 'cross_entropy'.")
 
 class COVHOPF(AbstractNMM):
     """
@@ -654,7 +768,7 @@ class COVHOPF(AbstractNMM):
         def U_nu(nu):
             Cexp = C_exp(nu)
             U_block = B + g * Cexp + 1j * 2 * np.pi * nu * torch.eye(2 * n, dtype=torch.complex64, device=device)
-            return torch.linalg.inv(U_block)
+            return torch.linalg.pinv(U_block)
 
         cov_model = torch.zeros((n_ch, n_ch), dtype=torch.float32, device=device)
 
@@ -745,215 +859,186 @@ class Model_fitting(AbstractFitting):
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
 
-    def train(self, empCOV: torch.Tensor, valCOV: torch.Tensor = None,
-              num_epochs: int = 120, learningrate: float = 0.05, lr_2ndLevel: float = 0.05, 
-              lr_scheduler: bool = False, scheduler_type: str = 'ReduceLROnPlateau', loss_method: str = 'log_fro',
-              run_val: bool = False, val_freq: int = 10,
-              debug_loss: bool = False, debug_grad: bool = False):
-        """
-        Function to train the model (with optional validation).
-
-        Parameters
-        ----------
-        empCOV: torch.Tensor
-            Empirical Covariance Matrix for training.
-        valCOV: torch.Tensor, optional
-            Empirical Covariance Matrix for validation.
-        num_epochs: int
-            Number of training epochs.
-        learningrate: float
-            Learning rate for model parameters.
-        lr_2ndLevel: float
-            Learning rate for hyperparameters.
-        lr_scheduler: bool
-            Whether to use learning rate scheduling.
-        scheduler_type: str
-            Type of learning rate scheduler ('ReduceLROnPlateau' or 'OneCycleLR').
-        loss_method: str
-            Loss method for training and validation ('mse', 'log_loss' and 'log_fro'.).
-        run_validation: bool
-            Whether to run validation during training.
-        validation_frequency: int
-            Frequency (in epochs) of validation runs.
-        """
+    def _debug_scope_gamma(self, empCOV, loss_method, gamma_candidates=[0.01, 0.1]):
+        """Debug helper for scope_gamma tuning"""
+        self.model.zero_grad()
+        with torch.cuda.amp.autocast():
+            simCOV = self.model()
+            loss = self.cost.loss(empCOV, simCOV, loss_method)
+        loss.backward()
         
-        # Define two different optimizers for each group
-        modelparameter_optimizer = optim.Adam(self.model.params_fitted['modelparameter'], 
-                                              lr=learningrate, betas=(0.9, 0.999), eps=1e-8, amsgrad=True)
-        if 'hyperparameter' in self.model.params_fitted and self.model.params_fitted['hyperparameter']:
-            hyperparameter_optimizer = optim.Adam(self.model.params_fitted['hyperparameter'], 
-                                                  lr=lr_2ndLevel, betas=(0.9, 0.999), eps=1e-8, amsgrad=True)
-        else:
-            hyperparameter_optimizer = None  # No hyperparameters
-        
-        print('Scheduler Type: ', scheduler_type)
-        # Define the learning rate schedulers for each group of parameters
-        if lr_scheduler:
-            total_steps = num_epochs
-
-            if scheduler_type == 'OneCycleLR':
-                # OneCycleLR setup
-                if hyperparameter_optimizer: 
-                    hyperparameter_scheduler = optim.lr_scheduler.OneCycleLR(hyperparameter_optimizer,
-                                                                            10 * lr_2ndLevel,
-                                                                            total_steps,
-                                                                            anneal_strategy="cos")
-                    hlrs = []
-                modelparameter_scheduler = optim.lr_scheduler.OneCycleLR(modelparameter_optimizer,
-                                                                        10*learningrate,
-                                                                        total_steps,
-                                                                        anneal_strategy="cos")
-                mlrs = []
-
-            elif scheduler_type == 'ReduceLROnPlateau':
-                # ReduceLROnPlateau setup
-                if hyperparameter_optimizer: 
-                    hyperparameter_scheduler = optim.lr_scheduler.ReduceLROnPlateau(hyperparameter_optimizer,
-                                                                                    mode='min',
-                                                                                    factor=0.5,
-                                                                                    patience=5,
-                                                                                    verbose=True,
-                                                                                    min_lr=1e-5)
-                    hlrs = []
-                modelparameter_scheduler = optim.lr_scheduler.ReduceLROnPlateau(modelparameter_optimizer, 
-                                                                                mode='min', 
-                                                                                factor=0.5, 
-                                                                                patience=5, 
-                                                                                verbose=True, 
-                                                                                min_lr=1e-5)
-                mlrs = []
-            else:
-                raise ValueError("Unsupported scheduler type. Use 'OneCycleLR' or 'ReduceLROnPlateau'.")
-
-        # Set up device and mixed precision scaler
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        scaler = torch.cuda.amp.GradScaler()
-
-        # Training loop
-        for epoch in range(num_epochs):
-            print(f"\nEpoch {epoch + 1}/{num_epochs}")
-            loss_history = []
-
-            def closure():
-                if hyperparameter_optimizer:
-                    hyperparameter_optimizer.zero_grad()
-                modelparameter_optimizer.zero_grad()
-
-                # Forward pass and loss computation
-                with torch.cuda.amp.autocast():
-                    simCOV = self.model(freq_chunk_size=20, debug_sim=False)
-                    loss = self.cost.loss(empCOV, simCOV, loss_method, debug_loss)
-                loss = loss.to(device)
-                scaler.scale(loss).backward()
-                print(f"Loss: {loss.item():.6f}")
-                loss_history.append(loss.item())
-                return loss, simCOV
+        print("\n=== scope_gamma Debug ===")
+        for name, param in self.model.named_parameters():
+            if param.grad is None or name in self.model.params_fitted['hyperparameter']:
+                continue
+                
+            grad_norm = param.grad.norm().item()
+            print(f"{name:20s} | ∇f(x): {grad_norm:.3e}")
             
-            loss, simCOV = closure()
+            for gamma in gamma_candidates:
+                entropy_term = gamma * param.data.norm().item()
+                ratio = entropy_term / (grad_norm + 1e-8)
+                print(f"{' ':20s} | γ={gamma:.3f}: |γ(x-μ)|={entropy_term:.3e} (ratio={ratio:.2f})")
 
-            # Perform validation
-            if run_val and (epoch + 1) % val_freq == 0:
-                if valCOV is not None:
+    def train(self, empCOV: torch.Tensor, EntropyHyperParam: dict, valCOV: torch.Tensor = None,
+              num_epochs: int = 120, learningrate: float = 0.05, lr_2ndLevel: float = 0.05, 
+              lr_scheduler: bool = False, scheduler_type: str = 'ReduceLROnPlateau', 
+              loss_method: str = 'log_fro', run_val: bool = False, val_freq: int = 10,
+              debug_loss: bool = False, debug_gamma: bool = False):
+            
+            gamma = EntropyHyperParam['gamma']
+            eta_prime = EntropyHyperParam['eta_prime']
+            L = EntropyHyperParam['L']
+            alpha = EntropyHyperParam['alpha']
+            noise_scale = EntropyHyperParam['noise_scale']
+
+
+            # Initialize Entropy-Adam for model parameters
+            modelparameter_optimizer = EntropyAdam(
+                self.model.params_fitted['modelparameter'],
+                lr=learningrate,
+                gamma=gamma,          # Tune based on gradient scales
+                eta_prime=eta_prime,      # SGLD step size
+                L=L,               # Langevin steps
+                alpha=alpha,         # EMA decay
+                noise_scale=noise_scale
+            )
+            
+            # Keep plain Adam for Bayesian hyperparameters (priors)
+            if 'hyperparameter' in self.model.params_fitted and self.model.params_fitted['hyperparameter']:
+                hyperparameter_optimizer = optim.Adam(
+                    self.model.params_fitted['hyperparameter'],
+                    lr=lr_2ndLevel, 
+                    betas=(0.9, 0.999), 
+                    eps=1e-8, 
+                    amsgrad=True
+                )
+            else:
+                hyperparameter_optimizer = None
+
+            # Learning rate schedulers (unchanged)
+            if lr_scheduler and scheduler_type == 'ReduceLROnPlateau':
+                if hyperparameter_optimizer:
+                    hyperparameter_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                        hyperparameter_optimizer, mode='min', factor=0.5, patience=5
+                    )
+                modelparameter_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                    modelparameter_optimizer, mode='min', factor=0.5, patience=5
+                )
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            scaler = torch.cuda.amp.GradScaler()
+
+            if debug_gamma:
+                self._debug_scope_gamma(empCOV, loss_method)
+
+
+            for epoch in range(num_epochs):
+                print(f"\nEpoch {epoch + 1}/{num_epochs}")
+                loss_history = []
+
+                def closure():
+                    if hyperparameter_optimizer:
+                        hyperparameter_optimizer.zero_grad()
+                    modelparameter_optimizer.zero_grad()
+
+                    with torch.cuda.amp.autocast():
+                        simCOV = self.model(freq_chunk_size=20, debug_sim=False)
+                        loss = self.cost.loss(empCOV, simCOV, loss_method, debug_loss)
+                    
+                    loss = loss.to(device)
+                    scaler.scale(loss).backward()
+                    loss_history.append(loss.item())
+                    print(f"Loss: {loss.item():.6f}")
+                    return loss, simCOV
+
+                loss, simCOV = closure()
+
+                # Validation
+                if run_val and (epoch + 1) % val_freq == 0 and valCOV is not None:
                     val_loss, val_corr, val_cos_sim, val_r2 = self.validate(valCOV, loss_method)
 
                     self.valStats[epoch + 1] = {
                         "loss": val_loss,
                         "corr": val_corr,
-                        "cosine_similarity": val_cos_sim,
+                        "cos_sim": val_cos_sim,
                         "r2": val_r2
                     }
-                    print(f"Validation Loss: {val_loss:.6f}, Corr: {val_corr:.4f}, Cosine Sim: {val_cos_sim:.4f}")
-                else:
-                    print("Validation data not provided. Skipping validation.")
+                    print(f"Validation Loss: {val_loss:.6f}, Corr: {val_corr:.4f}, CosSim: {val_cos_sim:.4f}, R2: {val_r2:.4f}")
 
-            if hyperparameter_optimizer:
-                scaler.step(hyperparameter_optimizer)
-            scaler.step(modelparameter_optimizer)
-            scaler.update()
-
-            if debug_grad:
-                if hasattr(self.model.params.wll.val, 'grad') and self.model.params.wll.val.grad is not None:
-                    wll_grads = self.model.params.wll.val.grad
-                    print(f"Gradients for wll: {wll_grads}")
-                    print(f"Mean Gradient: {wll_grads.mean().item()}")
-                    print(f"Max Gradient: {wll_grads.max().item()}")
-                    print(f"Min Gradient: {wll_grads.min().item()}")
-
-            # Apply gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.model.params_fitted['modelparameter'], max_norm=10.0)  
-            torch.nn.utils.clip_grad_norm_(self.model.params_fitted['hyperparameter'], max_norm=10.0) 
-
-            if lr_scheduler:
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.model.params_fitted['modelparameter'], max_norm=10.0)
                 if hyperparameter_optimizer:
-                    hlrs.append(hyperparameter_optimizer.param_groups[0]["lr"])
-                mlrs.append(modelparameter_optimizer.param_groups[0]["lr"])
+                    torch.nn.utils.clip_grad_norm_(self.model.params_fitted['hyperparameter'], max_norm=10.0)
 
-                # scheduler step
-                if scheduler_type == 'OneCycleLR':
-                    if hyperparameter_optimizer:
-                        hyperparameter_scheduler.step()
-                    modelparameter_scheduler.step()
-                elif scheduler_type == 'ReduceLROnPlateau':
+                # Optimizer steps (Entropy-Adam handles its own SGLD internally)
+                if hyperparameter_optimizer:
+                    scaler.step(hyperparameter_optimizer)
+                scaler.step(modelparameter_optimizer)
+                scaler.update()
+
+                # LR scheduling
+                if lr_scheduler and scheduler_type == 'ReduceLROnPlateau':
                     if hyperparameter_optimizer:
                         hyperparameter_scheduler.step(loss.item())
                     modelparameter_scheduler.step(loss.item())
 
-            # Calculate Pseudo FC Correlation, Cosine Similarity and R2
-            eps = 1e-8
-            empData = empCOV.detach().cpu().numpy()
-            simData = simCOV.detach().cpu().numpy()
+                # Calculate Pseudo FC Correlation, Cosine Similarity and R2
+                eps = 1e-8
+                empData = empCOV.detach().cpu().numpy()
+                simData = simCOV.detach().cpu().numpy()
 
-            emp_norm = empData / (np.linalg.norm(empData, 'fro') + eps)
-            sim_norm = simData / (np.linalg.norm(simData, 'fro') + eps)
+                emp_norm = empData / (np.linalg.norm(empData, 'fro') + eps)
+                sim_norm = simData / (np.linalg.norm(simData, 'fro') + eps)
 
-            sim_rescaled = Scaler(pred=sim_norm, target=emp_norm)
+                sim_rescaled = Scaler(pred=sim_norm, target=emp_norm)
 
-            emp_flat = emp_norm.flatten().reshape(1, -1)
-            sim_flat = sim_rescaled.flatten().reshape(1, -1)
+                emp_flat = emp_norm.flatten().reshape(1, -1)
+                sim_flat = sim_rescaled.flatten().reshape(1, -1)
 
-            pseudo_fc_cor = np.corrcoef(emp_flat[0], sim_flat[0])[0, 1]
-            cos_sim = cosine_similarity(emp_flat, sim_flat)[0, 0]
-            r2 = r2_score(emp_flat[0], sim_flat[0])
+                pseudo_fc_cor = np.corrcoef(emp_flat[0], sim_flat[0])[0, 1]
+                cos_sim = cosine_similarity(emp_flat, sim_flat)[0, 0]
+                r2 = r2_score(emp_flat[0], sim_flat[0])
 
-            # Log metrics
-            print(f"Pseudo FC Corr: {pseudo_fc_cor:.4f}")
-            print(f"cos_sim: {cos_sim:.4f}")
-            print(f"R²: {r2:.4f}")
+                # Log metrics
+                print(f"Pseudo FC Corr: {pseudo_fc_cor:.4f}")
+                print(f"cos_sim: {cos_sim:.4f}")
+                print(f"R²: {r2:.4f}")
 
-            if lr_scheduler:
-                for param_group in modelparameter_optimizer.param_groups:
-                    print('Modelparam_lr:', param_group['lr'])
-                if hyperparameter_optimizer:
-                    for param_group in hyperparameter_optimizer.param_groups:
-                        print('Hyperparam_lr:', param_group['lr'])
+                if lr_scheduler:
+                    for param_group in modelparameter_optimizer.param_groups:
+                        print('Modelparam_lr:', param_group['lr'])
+                    if hyperparameter_optimizer:
+                        for param_group in hyperparameter_optimizer.param_groups:
+                            print('Hyperparam_lr:', param_group['lr'])
 
-            self.trainingStats.appendLoss(np.mean(loss_history))
+                self.trainingStats.appendLoss(np.mean(loss_history))
 
-            # Parameter info for the Epoch
-            trackedParam = {}
-            exclude_param = ['wll', 'gains_con', 'lm'] #This stores SC and LF which are saved seperately
-            if(self.model.track_params):
-                for par_name in self.model.track_params:
-                    var = getattr(self.model.params, par_name)
-                    if (var.fit_par):
-                        trackedParam[par_name] = var.value().detach().cpu().numpy().copy()
-                    if (var.fit_hyper):
-                        trackedParam[par_name + "_prior_mean"] = var.prior_mean.detach().cpu().numpy().copy()
-                        trackedParam[par_name + "_prior_var"] = var.prior_var.detach().cpu().numpy().copy()
-            for key, value in self.model.state_dict().items():
-                if key not in exclude_param:
-                    trackedParam[key] = value.detach().cpu().numpy().ravel().copy()
-            self.trainingStats.appendParam(trackedParam)
-            # Saving the SC and/or Lead Field State at Every Epoch
-            if self.model.use_fit_gains:
-                self.trainingStats.appendWll(self.model.wll.detach().cpu().numpy())
-                self.trainingStats.appendCONN(self.model.sc_fitted.detach().cpu().numpy())
-            if self.model.use_fit_lfm:
-                self.trainingStats.appendLF(self.model.lm.detach().cpu().numpy())
+                # Parameter info for the Epoch
+                trackedParam = {}
+                exclude_param = ['wll', 'gains_con', 'lm'] #This stores SC and LF which are saved seperately
+                if(self.model.track_params):
+                    for par_name in self.model.track_params:
+                        var = getattr(self.model.params, par_name)
+                        if (var.fit_par):
+                            trackedParam[par_name] = var.value().detach().cpu().numpy().copy()
+                        if (var.fit_hyper):
+                            trackedParam[par_name + "_prior_mean"] = var.prior_mean.detach().cpu().numpy().copy()
+                            trackedParam[par_name + "_prior_var"] = var.prior_var.detach().cpu().numpy().copy()
+                for key, value in self.model.state_dict().items():
+                    if key not in exclude_param:
+                        trackedParam[key] = value.detach().cpu().numpy().ravel().copy()
+                self.trainingStats.appendParam(trackedParam)
+                # Saving the SC and/or Lead Field State at Every Epoch
+                if self.model.use_fit_gains:
+                    self.trainingStats.appendWll(self.model.wll.detach().cpu().numpy())
+                    self.trainingStats.appendCONN(self.model.sc_fitted.detach().cpu().numpy())
+                if self.model.use_fit_lfm:
+                    self.trainingStats.appendLF(self.model.lm.detach().cpu().numpy())
             
-        # Save the last optimized covariance matrix
-        self.lastRec = {}
-        self.lastRec["simCOV"] = sim_rescaled
+            # Save the last optimized covariance matrix
+            self.lastRec = {}
+            self.lastRec["simCOV"] = sim_rescaled
 
     def validate(self, valCOV: torch.Tensor, loss_method: str = 'log_fro'):
         """
@@ -1081,7 +1166,7 @@ class Model_fitting(AbstractFitting):
 
         self.sim = {
             "simCOV": sim_rescaled.detach().cpu().numpy(),
-            "empCOV": empCOV.detach().cpu().numpy()
+            "empCOV": emp.detach().cpu().numpy()
         }
 
         print("Simulation completed. Covariance matrix saved in '.sim['simCOV']'.")
@@ -1183,11 +1268,17 @@ class CostsHP(AbstractLoss):
         self.model = model
     
     def loss(self, empData: torch.Tensor, simData: torch.Tensor, loss_method: str = 'mse' ,debug_loss: bool = False):
-        eps = 1e-8  # avoid dividing by very small values in the Normalization procedure
-        sim = simData / (simData.norm(p='fro') + eps)
-        emp = empData / (empData.norm(p='fro') + eps)
+        eps = 1e-8  
 
-        sim_rescaled = Scaler(pred=sim, target=emp)
+        if loss_method == 'cross_entropy':
+            # Apply softmax
+            sim = torch.nn.functional.softmax(simData.flatten(), dim=0).view_as(simData)
+            emp = torch.nn.functional.softmax(empData.flatten(), dim=0).view_as(empData)
+            sim_rescaled = sim 
+        else:
+            sim = simData / (simData.norm(p='fro') + eps)
+            emp = empData / (empData.norm(p='fro') + eps)
+            sim_rescaled = Scaler(pred=sim, target=emp)
 
         model = self.model
 
@@ -1254,6 +1345,7 @@ class CostsHP(AbstractLoss):
             print(f"Total Loss: {total_loss.item()}")
         
         return total_loss
+    
     
 #######################################################################################################################################################################################################
 # Running Code Start HERE
@@ -1430,6 +1522,14 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
                     v_d = par(1., 1., 0.4, True, True), cy0 = par(50, 50, 1, True, True),
                     lm=par(lm0), wll=par(wll0, wll0, 0.02*np.ones_like(wll0), True, True))
 
+    
+    EntropyHyperParam = {
+    'gamma': 0.1,
+    'eta_prime': 0.9,
+    'L': 10,
+    'alpha': 0.75,
+    'noise_scale': 5e-3}
+
     # Simulation start
     n_epochs = 120
     start_time = time.time()
@@ -1445,12 +1545,12 @@ def main(n_sub: int = 1, train_region: str = 'Premotor',
 
     if not valFlag:
         # Train
-        F.train(empCOV = empCOV, num_epochs = n_epochs, 
-                lr_scheduler = True, scheduler_type = sched_type, loss_method = loss_method, debug_loss = False)
+        F.train(empCOV = empCOV, EntropyHyperParam = EntropyHyperParam, num_epochs = n_epochs, 
+                lr_scheduler = True, loss_method = loss_method, debug_loss = False, debug_gamma=True)
     else:
         # Train with validation
         F.train(empCOV = trainCOV, valCOV = valCOV, num_epochs = n_epochs, lr_scheduler = True,
-                scheduler_type = sched_type, loss_method = loss_method, 
+                loss_method = loss_method, 
                 run_val = True, val_freq = 10, debug_loss = False)
         F.test(testCOV = testCOV, loss_method = loss_method)
 
