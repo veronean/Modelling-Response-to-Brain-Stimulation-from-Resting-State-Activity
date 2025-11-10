@@ -40,7 +40,7 @@ Holds a set of neurotransmitter receptor maps that encode regional heterogeneity
 
 ### Code
 
-- `cov_main.py`: The main script for:
+- `cov_maps.py`: The main script for:
   - Fitting the covariance matrix of resting-state activity.
   - Saving the optimized parameters for further analysis.
 
@@ -86,9 +86,9 @@ Holds a set of neurotransmitter receptor maps that encode regional heterogeneity
 
 ## Code Structure
 
-The `cov_main.py` script performs the following steps:
+The `cov_maps.py` script performs the following steps:
 
-1. **Load Data**: Reads structural and functional connectivity data, as well as TMS-related files.
+1. **Load Data**: Reads data
 2. **Compute Covariance**: Fits the covariance matrix using resting-state activity data.
 3. **Optimize Parameters**: Uses optimization techniques to fit the model to the covariance matrix.
 4. **Save Results**: Stores the optimized parameters for further use in simulations.
