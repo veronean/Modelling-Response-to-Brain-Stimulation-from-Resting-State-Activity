@@ -1204,101 +1204,6 @@ class Model_fitting(AbstractFitting):
         }
 
         print("Simulation completed. Covariance matrix saved in '.sim['simCOV']'.")
-
-    def PSD(self):
-        '''
-        Function that computes the Power Spectral Density of the Hopf Whole Brain Model.
-        '''
-        print('Computing PSD')
-        # Ensure device consistency
-        device = self.device 
-
-        n = self.model.node_size
-        n_ch = self.model.output_size
-        m = nn.ReLU()
-
-        # Bounding Constant
-        con_1 = torch.tensor(1.0, dtype=torch.float32, device=device)
-        conduct_lb = 1.5  # lower bound for conduct velocity
-        noise_std_lb = 20 # lower bound of std of noise
-        lb = 0.01         # lower bound of local gains
-
-        a0 = -m(-self.model.params.a.value()).to(device)                  # Node's bifurcation parameter (s^-1)
-        a = a0 * torch.ones(n, device=device) if a0.dim() == 0 else a0
-        if self.model.params.omega.use_heterogeneity:
-            omega = self.model.params.omega.value().to(device)
-        else:
-            mean_omega = m(self.model.params.omega.value()).to(device)        # Intrinsic angular frequency (rad.s^-1)
-            sig_omega = (self.model.params.sig_omega.value()).to(device)      # Variance of the angular frequency
-            omega = m(torch.normal(mean=mean_omega.item(), std=sig_omega.item(), size=(n,))).to(device)
-
-        g = (lb * con_1 + m(self.model.params.g.value())).to(device)                      # Global Connectivity Scaling (s^-1)
-        std_in = (noise_std_lb * con_1 + m(self.model.params.std_in.value())).to(device)  # White noise standard deviation
-        v_d = (conduct_lb * con_1 + m(self.model.params.v_d.value())).to(device)          # Conduction Velocity (or its inverse i don't remember)
-        cy0 = self.model.params.cy0.value().to(device)                                    # Leadfield Matrix Scaling Parameter
-
-        # Update the Laplacian based on the updated connection gains wll.
-        w_l = torch.exp(self.model.wll) * torch.tensor(self.model.sc, dtype=torch.float32, device=device)
-        w_n_l = w_l / torch.linalg.norm(w_l)
-        dg_l = -torch.diag(torch.sum(w_n_l, dim=1))
-
-        C = (w_n_l + dg_l)
-        S = torch.sum(C, axis=1)
-        gamma = (torch.tensor(self.dist, dtype=torch.float32, device=device) / (v_d) 
-                      if v_d.ndimension() == 0 else torch.tensor(self.dist, dtype=torch.float32, device=device) / (v_d[None, :]))
-
-        # EEG computation (Leadfield Matrix)
-        lm_t = (self.model.lm.T / torch.sqrt(self.model.lm ** 2).sum(1)).T
-        lm_t = (lm_t - 1 / n_ch * torch.matmul(torch.ones((1,n_ch), device=device), lm_t))
-
-        Bxx = torch.diag(a - g * S)
-        Bxy = torch.diag(2 * torch.pi * omega)
-        B = torch.zeros(2 * n, 2 * n, dtype=torch.float32, device=device)
-        B[:n, :n] = Bxx
-        B[:n, n:] = Bxy
-        B[n:, :n] = -Bxy
-        B[n:, n:] = Bxx
-
-        Q = (std_in**2) * torch.eye(2 * n, dtype=torch.complex64, device=device)
-
-        def C_exp(nu):
-            exp_matrix = torch.exp(1j * 2 * np.pi * nu * gamma)
-            C_block = torch.zeros(2 * n, 2 * n, dtype=torch.complex64, device=device)
-            C_block[:n, :n] = C * exp_matrix
-            C_block[n:, n:] = C * exp_matrix
-            return C_block
-
-        def U_nu(nu):
-            Cexp = C_exp(nu)
-            U_block = B + g * Cexp + 1j * 2 * np.pi * nu * torch.eye(2 * n, dtype=torch.complex64, device=device)
-            return torch.linalg.inv(U_block)
-        
-        # Compute the cross-spectrum over the range
-        Psi_nu = []
-        # Iterate over the frequencies.
-        for nu in self.model.freqs:
-            # Compute U_nu(nu)
-            U = U_nu(nu)
-            
-            # Compute the cross-spectrum for the current frequency.
-            cross_spectrum = U @ Q @ U.conj().T
-            
-            # Append the result to the list.
-            Psi_nu.append(cross_spectrum)
-
-        # Convert the list of results to a PyTorch tensor.
-        Psi_nu = torch.stack(Psi_nu)
-        
-        # Compute the power spectrum in the space of channels
-        psd = torch.zeros((n_ch, len(self.model.freqs)), dtype=torch.float32, device=device)
-            
-        for i, nu in enumerate(self.model.freqs):
-            Z_xx = Psi_nu[i][:n, :n].real  # Extract the block corresponding to the real part x
-            Y = cy0**2 * (lm_t) @ Z_xx @ (lm_t).T  # Transform to channel space
-            psd[:, i] = Y.diagonal()  # Store the diagonal (PSD values)
-
-        self.psd = {}
-        self.psd['simPSD'] = psd.detach().cpu().numpy()
             
 class CostsHP(AbstractLoss):
     def __init__(self, model):
@@ -1506,8 +1411,9 @@ def main(n_sub: int = 1, train_region: str = 'Premotor'):
     F.simulate(empCOV = empCOV) 
 
     # Save fitting results to a file using pickle
-    store_filename = os.path.join('Results_Neuromaps', 
-                                  f'Subject{subject_num}_{train_region}_{loss_method}_{sched_type}_fitting_results.pkl')
+    results_folder = repo_root / 'Results_Neuromaps'
+    results_folder.mkdir(exist_ok=True)
+    store_filename = results_folder / f'Subject{subject_num}_{train_region}_{loss_method}_{sched_type}_fitting_results.pkl'
     with open(store_filename, 'wb') as file:
         pickle.dump(F, file)
     print("Results successfully saved to the file.")
