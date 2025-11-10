@@ -79,7 +79,7 @@ Holds a set of neurotransmitter receptor maps that encode regional heterogeneity
    - Ensure that structural, connection, and TMS data are in their respective directories.
 2. Run the main script:
    ```bash
-   python cov_main.py
+   python cov_maps.py
    ```
 3. Outputs:
    - Optimized parameters for the neural mass model.
