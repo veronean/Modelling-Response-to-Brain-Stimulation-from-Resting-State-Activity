@@ -123,7 +123,7 @@ class Recording:
         return self.data
 
 def forward(
-    external, hs, hEx, hEy, model_params, hyperparams, sc, dist
+    external, hs, hEx, hEy, model_params, hyperparams, dist
 ):
     """
     Simulates one window using forward Euler integration for the Hopf model.
@@ -344,15 +344,9 @@ def simulate(
         # External input for the current window
         external = torch.tensor(u_hat[:, :, win_idx * TRs_per_window:(win_idx + 1) * TRs_per_window], dtype=torch.float32)
 
-        # Forward simulation for this window
-        if lin:
-            next_window, hEx_new, hEy_new = forward_lin(
-                external, S, hEx, hEy, model_params, hyperparams, sc, dist
-            )
-        else:
-            next_window, hEx_new, hEy_new = forward(
-                external, S, hEx, hEy, model_params, hyperparams, sc, dist
-            )
+        next_window, hEx_new, hEy_new = forward(
+            external, S, hEx, hEy, model_params, hyperparams, sc, dist
+        )
 
         # Store the results (only for windows beyond the resting period)
         if win_idx > base_window_num - 1:
@@ -379,7 +373,6 @@ def simulate(
 
     return ts_sim, fc_sim, lastRec
 
-lin = False
 sc_fitted = ec_1
 
 pre_pulse = 0.6
@@ -434,4 +427,4 @@ pulse_end = int(sampling_freq * te)
 u[:,:,pulse_start:pulse_end]= 1000
 
 # Simulate
-ts_sim, fc_sim, lastRec = simulate(u, numTP, model_params, hyperparams, sc, dist, base_window_num = 20, lin=lin)
+ts_sim, fc_sim, lastRec = simulate(u, numTP, model_params, hyperparams, sc, dist, base_window_num = 20)
