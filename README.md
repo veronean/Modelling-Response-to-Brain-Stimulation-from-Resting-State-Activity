@@ -21,7 +21,6 @@ Holds parcellation, structural, and functional connectivity data:
 
 - **Parcellation**: Brain region definitions for the analysis.
 - **Structural connectivity (SC)**: Data describing physical connections between regions.
-- **Functional connectivity (FC)**: Correlation-based connectivity derived from resting-state activity.
 
 ### 3. `eegtms_data`
 
@@ -29,6 +28,15 @@ Includes information on TMS stimulation and EEG channel positions:
 
 - **Scalp channel position file**: Contains electrode positions.
 - **Stimulation reconstruction**: Describes the applied TMS stimulation patterns.
+
+### 4. `cov_data`
+
+Contains the resting-state covariance matrices for each subject. These matrices are used to fit the model to the observed brain activity.
+
+### 5. `neuromaps`
+
+Holds a set of neurotransmitter receptor maps that encode regional heterogeneity in the model, allowing the simulation to account for differences in local neurochemistry.
+
 
 ### Code
 

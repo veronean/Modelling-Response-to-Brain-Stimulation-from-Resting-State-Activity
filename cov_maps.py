@@ -1421,7 +1421,7 @@ def main(n_sub: int = 1, train_region: str = 'Premotor'):
     # Define the subfolders within your repo
     struct_data_folder = repo_root / 'struct_data'
     conn_data_folder = repo_root / 'conn_data'
-    data_folder = repo_root / 'data'
+    data_folder = repo_root / 'cov_data'
     neuromaps_folder = repo_root / 'neuromaps'
 
     # Load NeuroMaps
@@ -1433,7 +1433,7 @@ def main(n_sub: int = 1, train_region: str = 'Premotor'):
     # Channel labels and sampling frequency
     with open("metadata.json", "r") as f:
         metadata = json.load(f)
-        
+
     sampling_freq = metadata[f"SUB{n_sub}"]["sampling_freq"]
     channel_labels = metadata[f"SUB{n_sub}"]["channel_labels"]
     n_channels = len(channel_labels)    
