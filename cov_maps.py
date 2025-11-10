@@ -1380,7 +1380,7 @@ def main(n_sub: int = 1, train_region: str = 'Premotor'):
     sig_omega0 = 0.02
 
     freqs = np.linspace(1, 80, 800, endpoint=False)
-    params = ParamsHP(a=par((a0, 0.0), (a0, 0.0), (0.01*a0, 1e-3), fit_par=True, fit_hyper=False, 
+    params = ParamsHP(a=par((a0, 0.0), (a0, 0.0), (0.01*a0, 1e-3), fit_par=True, fit_hyper=True, 
                             use_heterogeneity=True, h_maps=h_map, param_bounds=(1.5*a0, 0.0)), 
                     omega=par(omega0, omega0, 0.02*omega0, fit_par=True, fit_hyper=True),
                     sig_omega=par(sig_omega0, sig_omega0, 0.02*sig_omega0, True, True),
