@@ -64,7 +64,7 @@ Holds a set of neurotransmitter receptor maps that encode regional heterogeneity
 
 1. The dependencies required for the project are:
     ```bash
-    gdown
+    json
     scipy
     pandas
     torch
