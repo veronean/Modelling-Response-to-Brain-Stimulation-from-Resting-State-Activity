@@ -12,53 +12,6 @@ warnings.filterwarnings('ignore')
 
 repo_root = Path(__file__).resolve().parent
 
-# Define the subfolders within your repo
-struct_data_folder = repo_root / 'struct_data'
-conn_data_folder = repo_root / 'conn_data'
-data_folder = repo_root / 'cov_data'
-neuromaps_folder = repo_root / 'neuromaps'
-eegtms_data_folder = repo_root / 'eegtms_data'
-
-ch_file = eegtms_data_folder / 'chlocs_nexstim.mat'
-region = ['Prefrontal', 'Premotor']
-
-# Select subject and region
-n_sub = 1
-region_key = region[1]
-
-# Channel labels and sampling frequency
-with open("metadata.json", "r") as f:
-    metadata = json.load(f)
-
-sampling_freq = metadata[f"SUB{n_sub}"]["sampling_freq"]
-channel_labels = metadata[f"SUB{n_sub}"]["channel_labels"]
-n_channels = len(channel_labels) 
-
-# Load Connectivity Matrix
-atlas = pd.read_csv(conn_data_folder / 'atlas_data.csv')
-labels = atlas['ROI Name']
-coords = np.array([atlas['R'], atlas['A'], atlas['S']]).T
-
-dist = np.zeros((coords.shape[0], coords.shape[0]))
-
-for roi1 in range(coords.shape[0]):
-  for roi2 in range(coords.shape[0]):
-    dist[roi1, roi2] = np.sqrt(np.sum((coords[roi1,:] - coords[roi2,:])**2, axis=0))
-    dist[roi1, roi2] = np.sqrt(np.sum((coords[roi1,:] - coords[roi2,:])**2, axis=0))
-
-sc_file = conn_data_folder / 'Schaefer2018_200Parcels_7Networks_count.csv'
-sc_df = pd.read_csv(sc_file, header=None, sep=' ')
-sc = sc_df.values
-sc = np.log1p(sc) / np.linalg.norm(np.log1p(sc))
-
-#Load TMS pulse
-st_file = eegtms_data_folder / f'stim_weights_{region_key}.npy'
-stim_weights = np.load(st_file)
-stim_weights_thr = stim_weights.copy()
-labels[np.where(stim_weights_thr>0)[0]]
-ki0 =stim_weights_thr[:,np.newaxis]
-
-# Unpack Third Version of Code (class obj)
 from COVHOPF import *
 
 results_folder = repo_root / 'Results_Neuromaps'
@@ -80,39 +33,6 @@ def load_res(subject_num, region_key):
     F = CPU_Unpickler(file).load()
 
   return F
-
-F = load_res(subject_num=n_sub, region_key=region_key)
-
-# Define parameter cases
-homogeneous_params = ['a', 'omega', 'sig_omega', 'v_d', 'g', 'std_in', 'cy0']
-heterogeneous_params = ['a']
-
-all_param_cov = {}
-
-# Get all parameters that exist in fit_params (regardless of heterogeneity)
-available_params = [p for p in homogeneous_params if p in F.trainingStats.fit_params]
-
-# Use all available parameters
-param_keys = available_params
-
-# Find the maximum length needed for padding
-max_length = max(len(np.array(F.trainingStats.fit_params[key][-1:]).flatten()) for key in param_keys)
-
-for key in param_keys:
-    last_values = np.array(F.trainingStats.fit_params[key][-1:]).flatten()
-    
-    # Pad the values to max_length
-    if last_values.shape[0] == 1:
-        last_values = last_values.tolist()
-    padded_values = np.pad(last_values, (0, max_length - len(last_values)), constant_values=np.nan)
-    all_param_cov[key] = padded_values
-
-# Convert to DataFrame
-pd.set_option('display.max_rows', None)
-df = pd.DataFrame(all_param_cov)
-
-lm_1 = F.model.lm.detach().numpy()
-ec_1 = F.model.sc_fitted.detach().numpy()
 
 class Recording:
     def __init__(self, data, step_size):
@@ -372,6 +292,90 @@ def simulate(
     lastRec['X'] = Recording(windListDict['X'],step_size=hyperparams['step_size'])
 
     return ts_sim, fc_sim, lastRec
+
+# =========================================================================== #
+#                          Main Simulation Script                             #
+# =========================================================================== #
+
+# Set up paths
+struct_data_folder = repo_root / 'struct_data'
+conn_data_folder = repo_root / 'conn_data'
+data_folder = repo_root / 'cov_data'
+neuromaps_folder = repo_root / 'neuromaps'
+eegtms_data_folder = repo_root / 'eegtms_data'
+
+ch_file = eegtms_data_folder / 'chlocs_nexstim.mat'
+region = ['Prefrontal', 'Premotor']
+
+# Select subject and region
+n_sub = 1
+region_key = region[1]
+
+# Channel labels and sampling frequency
+with open("metadata.json", "r") as f:
+    metadata = json.load(f)
+
+sampling_freq = metadata[f"SUB{n_sub}"]["sampling_freq"]
+channel_labels = metadata[f"SUB{n_sub}"]["channel_labels"]
+n_channels = len(channel_labels) 
+
+# Load Connectivity Matrix
+atlas = pd.read_csv(conn_data_folder / 'atlas_data.csv')
+labels = atlas['ROI Name']
+coords = np.array([atlas['R'], atlas['A'], atlas['S']]).T
+
+dist = np.zeros((coords.shape[0], coords.shape[0]))
+
+for roi1 in range(coords.shape[0]):
+  for roi2 in range(coords.shape[0]):
+    dist[roi1, roi2] = np.sqrt(np.sum((coords[roi1,:] - coords[roi2,:])**2, axis=0))
+    dist[roi1, roi2] = np.sqrt(np.sum((coords[roi1,:] - coords[roi2,:])**2, axis=0))
+
+sc_file = conn_data_folder / 'Schaefer2018_200Parcels_7Networks_count.csv'
+sc_df = pd.read_csv(sc_file, header=None, sep=' ')
+sc = sc_df.values
+sc = np.log1p(sc) / np.linalg.norm(np.log1p(sc))
+
+#Load TMS pulse
+st_file = eegtms_data_folder / f'stim_weights_{region_key}.npy'
+stim_weights = np.load(st_file)
+stim_weights_thr = stim_weights.copy()
+labels[np.where(stim_weights_thr>0)[0]]
+ki0 =stim_weights_thr[:,np.newaxis]
+
+# Load fitted parameters
+F = load_res(subject_num=n_sub, region_key=region_key)
+
+# Define parameter cases
+homogeneous_params = ['a', 'omega', 'sig_omega', 'v_d', 'g', 'std_in', 'cy0']
+heterogeneous_params = ['a']
+
+all_param_cov = {}
+
+# Get all parameters that exist in fit_params (regardless of heterogeneity)
+available_params = [p for p in homogeneous_params if p in F.trainingStats.fit_params]
+
+# Use all available parameters
+param_keys = available_params
+
+# Find the maximum length needed for padding
+max_length = max(len(np.array(F.trainingStats.fit_params[key][-1:]).flatten()) for key in param_keys)
+
+for key in param_keys:
+    last_values = np.array(F.trainingStats.fit_params[key][-1:]).flatten()
+    
+    # Pad the values to max_length
+    if last_values.shape[0] == 1:
+        last_values = last_values.tolist()
+    padded_values = np.pad(last_values, (0, max_length - len(last_values)), constant_values=np.nan)
+    all_param_cov[key] = padded_values
+
+# Convert to DataFrame
+pd.set_option('display.max_rows', None)
+df = pd.DataFrame(all_param_cov)
+
+lm_1 = F.model.lm.detach().numpy()
+ec_1 = F.model.sc_fitted.detach().numpy()
 
 sc_fitted = ec_1
 
