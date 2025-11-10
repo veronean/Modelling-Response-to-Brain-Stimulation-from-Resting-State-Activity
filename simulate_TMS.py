@@ -396,7 +396,8 @@ hidden_size = int(tr/step_size)
 
 numTP = time_dim
 
-k0 = all_param['k'][0]
+k0_dict = np.load(eegtms_data_folder / 'k_values.npy', allow_pickle=True).item()
+k0 = k0_dict[region_key][n_sub - 1]
 
 model_params = {
     'a': torch.tensor(all_param_cov['a'], dtype=torch.float32),
