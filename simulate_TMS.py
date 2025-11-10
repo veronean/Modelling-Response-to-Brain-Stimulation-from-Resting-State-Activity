@@ -21,6 +21,8 @@ eegtms_data_folder = repo_root / 'eegtms_data'
 
 ch_file = eegtms_data_folder / 'chlocs_nexstim.mat'
 region = ['Prefrontal', 'Premotor']
+
+# Select subject and region
 n_sub = 1
 region_key = region[1]
 
@@ -48,7 +50,6 @@ sc_file = conn_data_folder / 'Schaefer2018_200Parcels_7Networks_count.csv'
 sc_df = pd.read_csv(sc_file, header=None, sep=' ')
 sc = sc_df.values
 sc = np.log1p(sc) / np.linalg.norm(np.log1p(sc))
-
 
 #Load TMS pulse
 st_file = eegtms_data_folder / f'stim_weights_{region_key}.npy'
