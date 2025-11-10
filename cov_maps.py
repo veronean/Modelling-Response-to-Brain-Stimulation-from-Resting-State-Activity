@@ -1441,7 +1441,7 @@ def main(n_sub: int = 1, train_region: str = 'Premotor'):
     print(f'Processing Subject {subject_num}')
 
     # Load correlation on the resting state
-    with open(data_folder / f'/SUB{n_sub}_RES.pkl', "rb") as f:
+    with open(data_folder / f'SUB{n_sub}_RES.pkl', "rb") as f:
         trainData = pickle.load(f)
 
     empCOV = torch.tensor(trainData['cov_raw'], dtype=torch.float32, device='cuda' if torch.cuda.is_available() else 'cpu')
