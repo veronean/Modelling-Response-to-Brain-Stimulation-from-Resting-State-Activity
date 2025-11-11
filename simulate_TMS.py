@@ -381,9 +381,6 @@ sc_fitted = ec_1
 
 pre_pulse = 0.6
 step_size = 1e-4
-ts_args = dict(xlim=[pre_pulse-0.1,pre_pulse+0.3])
-time_start = 362
-time_end = 652
 time_dim = 290
 
 n_nodes = sc.shape[0]
