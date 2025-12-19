@@ -1345,8 +1345,8 @@ class CostsJR(AbstractLoss):
         return loss
 
 def prepare_static():
-    mat_data = scipy.io.loadmat(folder_path + '/Experiment_1.mat')
-    layout_mat_data = scipy.io.loadmat(folder_path + '/chlocs_nexstim.mat')
+    mat_data = scipy.io.loadmat(eegtms_data_folder / 'Experiment_1.mat')
+    layout_mat_data = scipy.io.loadmat(eegtms_data_folder / 'chlocs_nexstim.mat')
 
     n_channels = 60
     sfreq = 725
