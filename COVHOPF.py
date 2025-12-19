@@ -5,11 +5,17 @@ import torch.optim as optim
 import torch.nn as nn
 import warnings
 import pickle
-import sys
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import r2_score
 
 warnings.filterwarnings('ignore')
+torch.cuda.empty_cache()
+torch.cuda.reset_accumulated_memory_stats()
+
+import sys
+
+#neuroimaging packages
+import mne
 
 def Scaler(pred, target, eps=1e-8):
     """
@@ -41,52 +47,36 @@ class Suppressor:
 class par:
     def __init__(self, val, prior_mean=None, prior_var=None, 
                  fit_par=False, fit_hyper=False, use_heterogeneity=False, 
-                 h_maps=None, param_bounds=(0.0, 1.0),
+                 h_map=None,
                  device='cuda' if torch.cuda.is_available() else 'cpu'):
         '''
         Parameters
         ----------
-        val : Float or Tuple
+        val : Float
             If use heterogeneity is False: the parameter value
-            If use heterogeneity is True: (val_min, val_max)
+            If use heterogeneity is True: (val_min, val_scale)
         prior_mean : Float or Tuple
             If use_heterogeneity is False: prior_mean for the parameter.
-            If use_heterogeneity is True: (prior_min_mean, prior_max_mean).
+            If use_heterogeneity is True: (prior_min_mean, prior_scale_mean).
         prior_var : Float or Tuple
             If use_heterogeneity is False: prior_var for the parameter.
-            If use_heterogeneity is True: (prior_min_var, prior_max_var).
+            If use_heterogeneity is True: (prior_min_var, prior_scale_var).
         fit_par : Bool
             Whether the parameter value should be set as a PyTorch Parameter
         fit_hyper : Bool
             Whether the prior mean and prior variance should be set as a PyTorch Parameter
         use_heterogeneity : Bool
             Whether this parameter should be computed using a heterogeneity map.
-        h_map : List[Tensor] or Tensor (Optional)
-            The heterogeneity maps to be used (should match spatial dimensions of the parameter).
-            Can be a single tensor (for backward compatibility) or list of tensors for new version.
-        param_bounds : Tuple (min, max)
-            The minimum and maximum bounds for the parameter values when using heterogeneity.
-            Default is (0.0, 1.0).
+        h_map : Tensor (Optional)
+            The heterogeneity map to be used (should match spatial dimensions of the parameter).
         '''
         self.device = device
         self.use_heterogeneity = use_heterogeneity
-        self.fit_par = fit_par
-        self.fit_hyper = fit_hyper
-        self.param_bounds = param_bounds
-        
-        # Process heterogeneity maps
-        if use_heterogeneity and h_maps is not None:
-            if isinstance(h_maps, (list, tuple)):
-                self.h_maps = [torch.tensor(m, dtype=torch.float32, device=device) for m in h_maps]
-                self.num_maps = len(h_maps)
-            else:
-                self.h_maps = [torch.tensor(h_maps, dtype=torch.float32, device=device)]
-                self.num_maps = 1
-        else:
-            self.h_maps = None
-            self.num_maps = 0
+        self.h_map = torch.tensor(h_map, dtype=torch.float32, device=device) if h_map is not None else None
 
         if use_heterogeneity:
+            #if not isinstance(prior_mean, tuple) and not isinstance(prior_var, tuple):
+            #    raise ValueError("For heterogeneity, prior_mean and prior_var must be tuples (min, scale)")
             if np.all(prior_mean != None) and np.all(prior_var != None):
                 self.has_prior = True
             else:
@@ -95,25 +85,24 @@ class par:
                 prior_var = (0, 0)
                        
             self.val_min = torch.tensor(val[0], dtype=torch.float32, device=device)
-            self.val_max = torch.tensor(val[1], dtype=torch.float32, device=device)
-            
-            self.map_weights = torch.ones(self.num_maps, dtype=torch.float32, device=device) / self.num_maps
+            self.val_scale = torch.tensor(val[1], dtype=torch.float32, device=device)
             
             self.prior_min_mean = torch.tensor(prior_mean[0], dtype=torch.float32, device=device)
-            self.prior_max_mean = torch.tensor(prior_mean[1], dtype=torch.float32, device=device)
+            self.prior_scale_mean = torch.tensor(prior_mean[1], dtype=torch.float32, device=device)
             self.prior_min_var = torch.tensor(prior_var[0], dtype=torch.float32, device=device)
-            self.prior_max_var = torch.tensor(prior_var[1], dtype=torch.float32, device=device)
+            self.prior_scale_var = torch.tensor(prior_var[1], dtype=torch.float32, device=device)
             
+            self.fit_par = fit_par
+            self.fit_hyper = fit_hyper
+
             if fit_par:
                 self.val_min = nn.Parameter(self.val_min)
-                self.val_max = nn.Parameter(self.val_max)
-                self.map_weights = nn.Parameter(self.map_weights)
-                
+                self.val_scale = nn.Parameter(self.val_scale)
             if fit_hyper:
                 self.prior_min_mean = nn.Parameter(self.prior_min_mean)
                 self.prior_min_var = nn.Parameter(self.prior_min_var)
-                self.prior_max_mean = nn.Parameter(self.prior_max_mean)
-                self.prior_max_var = nn.Parameter(self.prior_max_var)
+                self.prior_scale_mean = nn.Parameter(self.prior_scale_mean)
+                self.prior_scale_var = nn.Parameter(self.prior_scale_var)
             
         else:
             if np.all(prior_mean != None) & np.all(prior_var != None):
@@ -130,37 +119,25 @@ class par:
             self.prior_mean = torch.tensor(prior_mean, dtype=torch.float32, device=device)
             self.prior_var = torch.tensor(prior_var, dtype=torch.float32, device=device)
 
+            self.fit_par = fit_par
+            self.fit_hyper = fit_hyper
+            
             if fit_par:
                 self.val = nn.Parameter(self.val)
             if fit_hyper:
                 self.prior_mean = nn.Parameter(self.prior_mean)
                 self.prior_var = nn.Parameter(self.prior_var)
-
+     
     def value(self):
-        if self.use_heterogeneity and self.h_maps is not None:
-            normalized_weights = torch.tanh(self.map_weights)
-            
-            if len(self.h_maps) == 1:
-                combined_map = self.h_maps[0]
-            else:
-                combined_map = sum(w * m for w, m in zip(normalized_weights, self.h_maps))
-            
-            # Apply constraints to val_min and val_max using the user-specified bounds
-            param_min, param_max = self.param_bounds
-            val_min = torch.sigmoid(self.val_min) * (param_max - param_min) + param_min
-            val_max = torch.sigmoid(self.val_max) * (param_max - param_min) + param_min
-            
-            # Ensure val_max > val_min
-            val_max = torch.max(val_min + 1e-6, val_max)
-            
-            if len(self.h_maps) == 1:
-                return val_min + normalized_weights[0] * combined_map * (val_max - val_min)
-            else:
-                v_min = combined_map.min()
-                v_max = combined_map.max()
-                scale = (val_max - val_min) / (v_max - v_min + 1e-6)
-                offset = val_min - scale * v_min
-                return scale * combined_map + offset
+        '''
+        Returns
+        ---------
+        Tensor of Value
+            The parameter value(s) as a PyTorch Tensor
+        '''
+        if self.use_heterogeneity and self.h_map is not None:
+            w = self.val_min + self.val_scale * self.h_map
+            return w
         else:
             return self.val
 
@@ -179,26 +156,21 @@ class par:
         if self.use_heterogeneity:
             if self.fit_par:
                 self.val_min = nn.Parameter(self.val_min.detach().clone().to(device))
-                self.val_max = nn.Parameter(self.val_max.detach().clone().to(device))
-                self.map_weights = nn.Parameter(self.map_weights.detach().clone().to(device))
+                self.val_scale = nn.Parameter(self.val_scale.detach().clone().to(device))
             else:
                 self.val_min = self.val_min.to(device)
-                self.val_max = self.val_max.to(device)
-                self.map_weights = self.map_weights.to(device)
+                self.val_scale = self.val_scale.to(device)
 
             if self.fit_hyper:
                 self.prior_min_mean = nn.Parameter(self.prior_min_mean.detach().clone().to(device))
                 self.prior_min_var = nn.Parameter(self.prior_min_var.detach().clone().to(device))
-                self.prior_max_mean = nn.Parameter(self.prior_max_mean.detach().clone().to(device))
-                self.prior_max_var = nn.Parameter(self.prior_max_var.detach().clone().to(device))
+                self.prior_scale_mean = nn.Parameter(self.prior_scale_mean.detach().clone().to(device))
+                self.prior_scale_var = nn.Parameter(self.prior_scale_var.detach().clone().to(device))
             else:
                 self.prior_min_mean = self.prior_min_mean.to(device)
                 self.prior_min_var = self.prior_min_var.to(device)
-                self.prior_max_mean = self.prior_max_mean.to(device)
-                self.prior_max_var = self.prior_max_var.to(device)
-                
-            # Move maps to device
-            self.h_maps = [m.to(device) for m in self.h_maps]
+                self.prior_scale_mean = self.prior_scale_mean.to(device)
+                self.prior_scale_var = self.prior_scale_var.to(device)
         else:
             if self.fit_par:
                 self.val = nn.Parameter(self.val.detach().clone().to(device))
@@ -216,27 +188,24 @@ class par:
         '''
         This method sets the initial value using the mean and variance of the priors.
         '''
+
         if self.use_heterogeneity:
             if self.has_prior:
                 self.val_min = self.prior_min_mean.detach() + self.prior_min_var.detach() * torch.randn(1, device=self.device)
-                self.val_max = self.prior_max_mean.detach() + self.prior_max_var.detach() * torch.randn(1, device=self.device)
-                self.map_weights = torch.randn(self.num_maps, device=self.device) * 0.1  # Small random weights
-                
+                self.val_scale = self.prior_scale_mean.detach() + self.prior_scale_var.detach() * torch.randn(1, device=self.device)
                 if self.fit_par:
                     self.val_min = nn.Parameter(self.val_min)
-                    self.val_max = nn.Parameter(self.val_max)
-                    self.map_weights = nn.Parameter(self.map_weights)
+                    self.val_scale = nn.Parameter(self.val_scale)
             else:
                 raise ValueError("must have priors provided at par object initialization to use this method")
         else:
             if self.has_prior:
-                self.val = self.prior_mean.detach() + self.prior_var.detach() * torch.randn(1, device=self.device)
+                self.var = self.prior_mean.detach() + self.prior_var.detach() * torch.randn(1, device=self.device)
                 if self.fit_par:
                     self.val = torch.nn.parameter.Parameter(self.val)
             else:
                 raise ValueError("must have priors provided at par object initialization to use this method")
 
-    # Keep all the operator overloads the same
     def __pos__(self):
         return self.value()
 
@@ -603,7 +572,7 @@ class COVHOPF(AbstractNMM):
         self.tr = tr 
         self.node_size = node_size          # num of ROI
         self.output_size = output_size      # num of EEG channels
-        self.sc = sc                        # matrix node_size x node_size structure connectivity
+        self.sc = torch.tensor(sc, dtype=torch.float32, device=self.device) # matrix node_size x node_size structure connectivity
         self.dist = torch.tensor(dist, dtype=torch.float32, device=self.device)
         self.lm = lm
         self.freqs = torch.tensor(freqs, dtype=torch.float32, device=self.device)
@@ -656,7 +625,7 @@ class COVHOPF(AbstractNMM):
             if var.use_heterogeneity:
                 if var.fit_hyper:
                     var.randSet()
-                    param_hyper.extend([var.prior_min_mean, var.prior_min_var, var.prior_max_mean, var.prior_max_var])
+                    param_hyper.extend([var.prior_min_mean, var.prior_min_var, var.prior_scale_mean, var.prior_scale_var])
             else:
                 if var.fit_hyper:
                     if var_name in ['lm', 'wll']:
@@ -670,7 +639,7 @@ class COVHOPF(AbstractNMM):
             
             if var.use_heterogeneity:
                 if var.fit_par:
-                    param_reg.extend([var.val_min, var.val_max, var.map_weights])
+                    param_reg.extend([var.val_min, var.val_scale])
             else:
                 if var.fit_par:
                     param_reg.append(var.val)
@@ -696,28 +665,32 @@ class COVHOPF(AbstractNMM):
 
         # Bounding Constant
         con_1 = torch.tensor(1.0, dtype=torch.float32, device=device)
-        conduct_lb = 1.5  # lower bound for conduct velocity
-        noise_std_lb = 20 # lower bound of std of noise
-        lb = 0.01         # lower bound of local gains
+        conduct_lb = 1.5                    # lower bound for conduct velocity
+        noise_std_lb = 20                   # lower bound of std of noise
+        lb = 0.01                           # lower bound of local gains
+        omega_ub = 2.0                      # upper bound of omega
+        eps = torch.randn(n, device=device) # Normal Distribution for omega
 
         # Extract model parameters and ensure they are on the same device
-        a0 = -m(-self.params.a.value()).to(device)                  # Node's bifurcation parameter (s^-1)
+        a0 = (self.params.a.value().to(device))                             # Node's bifurcation parameter (s^-1)
         a = a0 * torch.ones(n, device=device) if a0.dim() == 0 else a0
         if self.params.omega.use_heterogeneity:
-            omega = self.params.omega.value().to(device)
+            omega_raw = m(self.params.omega.value()).to(device)
+            omega = torch.sigmoid(omega_raw) * omega_ub
         else:
-            mean_omega = m(self.params.omega.value()).to(device)  # Intrinsic angular frequency (rad.s^-1)
-            raw_sig_omega = (self.params.sig_omega.value()).to(device)  # Raw parameter
-            sig_omega = torch.nn.functional.softplus(raw_sig_omega)  # Always positive
-            omega = m(torch.normal(mean=mean_omega.item(), std=sig_omega.item(), size=(n,))).to(device)
+            mean_omega_raw = m(self.params.omega.value()).to(device)        # Intrinsic angular frequency (rad.s^-1)
+            mean_omega = torch.sigmoid(mean_omega_raw) * omega_ub           # Apply upper bound to mean
+            sig_omega = m(self.params.sig_omega.value()).to(device)         # Variance of the angular frequency
+            omega_raw = mean_omega + sig_omega * eps
+            omega = torch.clamp(omega_raw, max=omega_ub)
 
         g = (lb * con_1 + m(self.params.g.value())).to(device)                      # Global Connectivity Scaling (s^-1)
         std_in = (noise_std_lb * con_1 + m(self.params.std_in.value())).to(device)  # White noise standard deviation
         v_d = (conduct_lb * con_1 + m(self.params.v_d.value())).to(device)          # Conduction Velocity (or its inverse i don't remember)
-        cy0 = self.params.cy0.value().to(device)                                    # Leadfield Matrix Scaling Parameter
+        cy0 = (self.params.cy0.value()).to(device)                                  # Leadfield Matrix Scaling Parameter
 
         # Update the Laplacian based on the updated connection gains wll.
-        w_l = torch.exp(self.wll) * torch.tensor(self.sc, dtype=torch.float32, device=device)
+        w_l = torch.exp(self.wll) * self.sc
         w_n_l = w_l / torch.linalg.norm(w_l)
         self.sc_fitted = w_n_l
         dg_l = -torch.diag(torch.sum(w_n_l, dim=1))
@@ -1033,14 +1006,12 @@ class Model_fitting(AbstractFitting):
                     var = getattr(self.model.params, par_name)
                     if (var.fit_par):
                         trackedParam[par_name] = var.value().detach().cpu().numpy().copy()
-                        if hasattr(var, 'map_weights'):
-                            trackedParam[par_name + "_map_weights"] = var.map_weights.detach().cpu().numpy().copy()
                     if (var.fit_hyper):
                         if var.use_heterogeneity:
                             trackedParam[par_name + "_prior_min_mean"] = var.prior_min_mean.detach().cpu().numpy().copy()
                             trackedParam[par_name + "_prior_min_var"] = var.prior_min_var.detach().cpu().numpy().copy()
-                            trackedParam[par_name + "_prior_max_mean"] = var.prior_max_mean.detach().cpu().numpy().copy()
-                            trackedParam[par_name + "_prior_max_var"] = var.prior_max_var.detach().cpu().numpy().copy()
+                            trackedParam[par_name + "_prior_scale_mean"] = var.prior_scale_mean.detach().cpu().numpy().copy()
+                            trackedParam[par_name + "_prior_scale_var"] = var.prior_scale_var.detach().cpu().numpy().copy()
                         else:
                             trackedParam[par_name + "_prior_mean"] = var.prior_mean.detach().cpu().numpy().copy()
                             trackedParam[par_name + "_prior_var"] = var.prior_var.detach().cpu().numpy().copy()
@@ -1186,7 +1157,7 @@ class Model_fitting(AbstractFitting):
 
         self.sim = {
             "simCOV": sim_rescaled.detach().cpu().numpy(),
-            "empCOV": empCOV.detach().cpu().numpy()
+            "empCOV": emp.detach().cpu().numpy()
         }
 
         print("Simulation completed. Covariance matrix saved in '.sim['simCOV']'.")
@@ -1208,10 +1179,9 @@ class CostsHP(AbstractLoss):
         # define some constants
         lb = 0.001
         w_cost = 1.0
-        reg_lambda = 0.01
-        weight_reg_scale = 0.01
+        reg_lambda = 1e-2
         reg_scales = {
-            'wll': 1e-3,  
+            'wll': 1e-4,  
             'lm': 1e-2,     
         }
 
@@ -1241,52 +1211,54 @@ class CostsHP(AbstractLoss):
 
             if var_name == 'sig_omega' and model.params.omega.use_heterogeneity:
                 continue
+
             if var_name in exclude_param:
                 continue
 
             if var.use_heterogeneity:
                 if var.has_prior:
-                    prior_loss_min = torch.sum(reg_scales.get(var_name, 1.0) * (lb + m(var.prior_min_var)) * 
+                    prior_loss_min = torch.sum(reg_scales.get(var_name, 1.0) * 1/(lb + m(var.prior_min_var)) * 
                                    (m(var.val_min) - m(var.prior_min_mean)) ** 2) \
                                    + torch.sum(-torch.log(lb + m(var.prior_min_var)))
                     
-                    prior_loss_max = torch.sum(reg_scales.get(var_name, 1.0) * (lb + m(var.prior_max_var)) * 
-                                   (m(var.val_max) - m(var.prior_max_mean)) ** 2) \
-                                   + torch.sum(-torch.log(lb + m(var.prior_max_var)))
+                    # Prior loss for val_scale
+                    prior_loss_scale = torch.sum(reg_scales.get(var_name, 1.0) * 1/(lb + m(var.prior_scale_var)) * 
+                                      (m(var.val_scale) - m(var.prior_scale_mean)) ** 2) \
+                                      + torch.sum(-torch.log(lb + m(var.prior_scale_var)))
                     
-                    loss_prior.append(prior_loss_min + prior_loss_max)
+                    # Combine prior losses
+                    prior_loss = prior_loss_min + prior_loss_scale
+                    loss_prior.append(prior_loss)
                     
+                    # Print prior loss contribution for debugging
                     if debug_loss:
-                        print(f"Prior loss for {var_name} min/max: {(prior_loss_min + prior_loss_max).item()}")
-                
-                if var.fit_par:
-                    weight_reg = weight_reg_scale * torch.sum(var.map_weights ** 2)
-                    reg_term += weight_reg
+                        print(f"Prior loss for {var_name} (heterogeneity): {prior_loss.item()}")
+                else:
+                    # Regularization for val_min and val_scale (no prior)
+                    reg_loss = reg_lambda * (torch.sum(var.val_min ** 2) + torch.sum(var.val_scale ** 2))
+                    reg_term += reg_loss
                     
+                    # Print regularization contribution
                     if debug_loss:
-                        print(f"  {var_name} weights regularization: {weight_reg.item()}")
-
-                # Regularization for val_min/val_max (if no prior exists)
-                if not var.has_prior:
-                    val_reg = reg_lambda * (torch.sum(var.val_min ** 2) + torch.sum(var.val_max ** 2))
-                    reg_term += val_reg
-                    
-                    if debug_loss:
-                        print(f"  {var_name} val_min/max regularization: {val_reg.item()}")
+                        print(f"  {var_name} (heterogeneity): {reg_loss.item()}")
             else:
-                # Original non-heterogeneous parameter handling
+                # Handle non-heterogeneity parameters
                 if var.has_prior:
-                    prior_loss = torch.sum(reg_scales.get(var_name, 1.0) * (lb + m(var.prior_var)) * 
+                    # Prior loss for non-heterogeneity parameters
+                    prior_loss = torch.sum(reg_scales.get(var_name, 1.0) * 1/(lb + m(var.prior_var)) * 
                                  (m(var.val) - m(var.prior_mean)) ** 2) \
                                  + torch.sum(-torch.log(lb + m(var.prior_var)))
                     loss_prior.append(prior_loss)
                     
+                    # Print prior loss contribution for debugging
                     if debug_loss:
                         print(f"Prior loss for {var_name}: {prior_loss.item()}")
                 else:
+                    # Regularization for non-heterogeneity parameters (no prior)
                     reg_loss = reg_lambda * torch.sum(var.val ** 2)
                     reg_term += reg_loss
                     
+                    # Print regularization contribution
                     if debug_loss:
                         print(f"  {var_name}: {reg_loss.item()}")
 
