@@ -1,3 +1,4 @@
+# Import Libraries and Data
 import numpy as np
 import scipy.io
 import pandas as pd
@@ -5,29 +6,33 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 import warnings
-import os
 import time
+import os
 import pickle
-from sklearn.metrics import r2_score
+import json
+from sklearn.metrics.pairwise import cosine_similarity
 from scipy.spatial.distance import cdist
+from sklearn.metrics import r2_score
 from pathlib import Path
 
 warnings.filterwarnings('ignore')
 torch.cuda.empty_cache()
 torch.cuda.reset_accumulated_memory_stats()
 
-import mne
 import sys
+
+#neuroimaging packages
+import mne
 
 repo_root = Path(__file__).resolve().parent
 
-# Set up paths
+# Define the subfolders within your repo
 struct_data_folder = repo_root / 'struct_data'
 conn_data_folder = repo_root / 'conn_data'
 data_folder = repo_root / 'cov_data'
+tms_data_folder = repo_root / 'eegtms_data'
+rest_fitpar_folder = repo_root / 'rest_fitpar'
 neuromaps_folder = repo_root / 'neuromaps'
-eegtms_data_folder = repo_root / 'eegtms_data'
-rest_params_path = repo_root / 'rest_fitpar'
 
 # Suppression block
 class Suppressor:
@@ -1310,7 +1315,7 @@ class CostsJR(AbstractLoss):
         lb = 0.001
 
         w_cost = 1
-        w_prior = 5e-4
+        w_prior = 3e-4
 
         # define the relu function
         m = torch.nn.ReLU()
@@ -1336,17 +1341,13 @@ class CostsJR(AbstractLoss):
                         var_name not in exclude_param:
                 loss_prior.append(torch.sum(((m(var.val) - m(var.prior_mean)) ** 2) * 1/(lb + m(var.prior_var))) \
                                   + torch.sum(-torch.log(lb + m(var.prior_var))))
-            elif var_name == 'wll':
-                # simple L2 even without prior
-                loss_prior.append(torch.sum(var.val**2))
-
         # total loss
         loss =  w_cost * loss_main + w_prior * sum(loss_prior) + 1 * loss_EI
         return loss
 
 def prepare_static():
-    mat_data = scipy.io.loadmat(eegtms_data_folder / 'Experiment_1.mat')
-    layout_mat_data = scipy.io.loadmat(eegtms_data_folder / 'chlocs_nexstim.mat')
+    mat_data = scipy.io.loadmat(tms_data_folder / 'Experiment_1.mat')
+    layout_mat_data = scipy.io.loadmat(tms_data_folder / 'chlocs_nexstim.mat')
 
     n_channels = 60
     sfreq = 725
@@ -1438,12 +1439,13 @@ def main(static, n_sub: int = 1,
     time_end = np.where(abs(evoked_train.times-ts_args['xlim'][1])<=1e-3)[0][0]
     eeg_data = eeg_data[:,time_start:time_end]/np.abs(eeg_data).max()*4
 
-    st_file = eegtms_data_folder / f'stim_weights_{train_region}.npy'
+    st_file = tms_data_folder / ('stim_weights_' + train_region + '.npy')
     stim_weights = np.load(st_file)
     stim_weights_thr = stim_weights.copy()
     ki0 = stim_weights_thr[:,np.newaxis]
 
-    fitted_params = np.load(rest_params_path / f"Sub{n_sub}_params.npz")
+    # Load rest fit parameters estimate (averaged over last 10 epochs)
+    fitted_params = np.load(rest_fitpar_folder / f"Sub{n_sub}_params.npz")
 
     a0 = fitted_params['a']
     omega0 = fitted_params['omega']
@@ -1461,10 +1463,10 @@ def main(static, n_sub: int = 1,
 
     params = ParamsHP(a = par(a0), omega = par(omega0), sig_omega = par(sig_omega0), 
                       g = par(g0), std_in = par(std_in0), 
-                      mu = par(mu0), k = par(5., fit_par=True, fit_hyper=False), 
+                      mu = par(mu0), k = par(2.5, fit_par=False, fit_hyper=False), 
                       cy0 = par(cy0), y0 = par(0), 
                       ki = par(ki0),
-                      wll = par(wll0, wll0, 1.5*np.ones_like(wll0), fit_par=True, fit_hyper=False),
+                      wll = par(wll0, wll0, 1.8*np.ones_like(wll0), fit_par=True, fit_hyper=False),
                       lm = par(lm0))
 
     # Simulation start
@@ -1473,7 +1475,7 @@ def main(static, n_sub: int = 1,
     output_size = eeg_data.shape[0]
     batch_size = 29
     step_size = 1e-4
-    num_epoches = 120
+    num_epoches = 200
     tr = 1/sfreq
     time_dim = eeg_data.shape[1]
     hidden_size = int(tr/step_size)
@@ -1541,6 +1543,7 @@ def main(static, n_sub: int = 1,
 def exe_main():
     static = prepare_static()
     stim_sites = ['Premotor', 'Prefrontal']
+    #stim_sites = ['Premotor']
 
     for site in stim_sites:
         for sub in range(1, 7):

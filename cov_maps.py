@@ -24,6 +24,14 @@ import sys
 #neuroimaging packages
 import mne
 
+repo_root = Path(__file__).resolve().parent
+
+# Define the subfolders within your repo
+struct_data_folder = repo_root / 'struct_data'
+conn_data_folder = repo_root / 'conn_data'
+data_folder = repo_root / 'cov_data'
+neuromaps_folder = repo_root / 'neuromaps'
+
 def Scaler(pred, target, eps=1e-8):
     """
     Apply rescaling of the predicted values to match the norm of the target values.
@@ -1282,81 +1290,47 @@ class CostsHP(AbstractLoss):
 # Running Code Start HERE
 #######################################################################################################################################################################################################
 
-def main(n_sub: int = 1, fit_gains: bool = True):
-    repo_root = Path(__file__).resolve().parent
-
-    # Define the subfolders within your repo
-    struct_data_folder = repo_root / 'struct_data'
-    conn_data_folder = repo_root / 'conn_data'
-    data_folder = repo_root / 'cov_data'
-    neuromaps_folder = repo_root / 'neuromaps'
-
-    # Load and normalize NeuroMap
-    R = np.load(neuromaps_folder + 'T1T2_parc.npy')
-    R_tilde = 1 / (1 + np.exp(-R)) 
-    R_min = np.min(R_tilde)
-    R_max = np.max(R_tilde)
-    R_norm = (R_tilde - R_min) / (R_max - R_min)
-    h_map = R_norm.squeeze()
+def main(empCOV, h_map, dist, sc, freqs,
+         n_sub: int = 1, fit_gains: bool = True):
 
     # Channel labels and sampling frequency
     with open("metadata.json", "r") as f:
         metadata = json.load(f)
 
-    sampling_freq = metadata[f"SUB{n_sub}"]["sampling_freq"]
-    channel_labels = metadata[f"SUB{n_sub}"]["channel_labels"]
-    n_channels = len(channel_labels)    
+    sfreq = metadata[f"SUB{n_sub}"]["sampling_freq"]
+    ch_labels = metadata[f"SUB{n_sub}"]["channel_labels"]
+    n_channels = len(ch_labels)    
 
     print(f'Processing Subject {n_sub}')
-
-    # Load correlation on the resting state
-    with open(data_folder / f'SUB{n_sub}_RES.pkl', "rb") as f:
-        trainData = pickle.load(f)
-
-    empCOV = torch.tensor(trainData['cov_raw'], dtype=torch.float32, device='cuda' if torch.cuda.is_available() else 'cpu')
-
-    # Load connectivity matrix
-    atlas = pd.read_csv(conn_data_folder / 'atlas_data.csv')
-    coords = np.array([atlas['R'], atlas['A'], atlas['S']]).T
-
-    dist = np.zeros((coords.shape[0], coords.shape[0]))
-    dist = cdist(coords, coords)
-
-    sc_file = conn_data_folder / 'Schaefer2018_200Parcels_7Networks_count.csv'
-    sc_df = pd.read_csv(sc_file, header=None, sep=' ')
-    sc = sc_df.values
-    sc = np.log1p(sc) / np.linalg.norm(np.log1p(sc))
 
     node_size = sc.shape[0]
     output_size = n_channels
 
-    lm_name = os.path.join(struct_data_folder, f'Subject{n_sub}_Premotor_leadfieldR.npy')
+    lm_name = struct_data_folder / f'Subject{n_sub}_leadfieldR.npy'
     lm0 = np.load(lm_name)
-
-    wll0 = np.zeros((node_size, node_size)) + 0.05
+        
+    wll0 = np.zeros_like(sc) + 0.05
 
     omega0 = 10.0 / (2 * np.pi)
     sig_omega0 = 0.2
-    a0 = -0.5
 
     freqs = np.linspace(1, 80, 800, endpoint=False)
-    params = ParamsHP(a=par((a0, 0.5), fit_par=True, use_heterogeneity=True, h_maps=h_map), 
-                    omega=par(omega0, fit_par=True),
-                    sig_omega=par(sig_omega0, fit_par=True),
-                    g=par(500, fit_par=True), 
-                    std_in= par(0.3, fit_par=True),
-                    v_d = par(2., fit_par=True), 
-                    cy0 = par(50, fit_par=True),
-                    lm=par(lm0), 
-                    wll=par(wll0, wll0, np.ones_like(wll0), fit_par=fit_gains)
-                    )
+    params = ParamsHP(a=par((-0.5, 0.5), fit_par=True, fit_hyper=False, use_heterogeneity=True, h_map=h_map), 
+                    omega=par(omega0, fit_par=True, fit_hyper=False),
+                    sig_omega=par(sig_omega0, fit_par=True, fit_hyper=False),
+                    g=par(500, fit_par=True, fit_hyper=False), 
+                    std_in= par(0.3, fit_par=True, fit_hyper=False),
+                    v_d = par(2., fit_par=True, fit_hyper=False), 
+                    cy0 = par(50, fit_par=True, fit_hyper=False),
+                    lm=par(lm0),
+                    wll=par(wll0, wll0, np.ones_like(wll0), fit_par=fit_gains, fit_hyper=False))
 
     # Simulation start
     n_epochs = 120
     start_time = time.time()
 
-    model = COVHOPF(node_size, output_size, sampling_freq, sc, dist, freqs, params, 
-                    lm=lm0, wll_init= wll0, 
+    model = COVHOPF(node_size, output_size, sfreq, sc, dist, freqs, params, 
+                    lm=lm0, wll_init=wll0, 
                     use_fit_gains=fit_gains, use_fit_lfm=False)
     ObjFun = CostsHP(model)
     F = Model_fitting(model, ObjFun)
@@ -1367,8 +1341,7 @@ def main(n_sub: int = 1, fit_gains: bool = True):
 
     # Train
     F.train(empCOV = empCOV, num_epochs = n_epochs, 
-            lr_scheduler = True, scheduler_type = sched_type, 
-            loss_method = loss_method, debug_loss = False)
+            lr_scheduler = True, scheduler_type = sched_type, loss_method = loss_method, debug_loss = False)
 
     # Simulate the model after training
     F.simulate(empCOV = empCOV) 
@@ -1391,7 +1364,48 @@ def main(n_sub: int = 1, fit_gains: bool = True):
     print(f"Elapsed time: {minutes} minutes and {seconds} seconds")
     print(f'Finished processing Subject {n_sub}')
 
-if __name__ == "__main__":
+def exe_main(map_name: str = 'T1T2'):
+    seed = 42
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    # Load correlation on the resting state
+    empCOV_dict = {
+        sub: torch.tensor(
+            pickle.load(open(data_folder / f'SUB{sub}_RES.pkl', "rb"))['cov_raw'],
+            dtype=torch.float32,
+            device='cuda' if torch.cuda.is_available() else 'cpu'
+        )
+        for sub in range(1, 7)
+    }
+
+    # Load and normalize NeuroMap
+    R = np.load(neuromaps_folder / f'{map_name}_parc.npy')
+    R_tilde = 1 / (1 + np.exp(-R)) 
+    R_min = np.min(R_tilde)
+    R_max = np.max(R_tilde)
+    R_norm = (R_tilde - R_min) / (R_max - R_min)
+    h_map = R_norm.squeeze()
+    
+    # Load connectivity matrix
+    atlas = pd.read_csv(conn_data_folder / 'atlas_data.csv')
+    coords = np.array([atlas['R'], atlas['A'], atlas['S']]).T
+
+    dist = np.zeros((coords.shape[0], coords.shape[0]))
+    dist = cdist(coords, coords)
+
+    sc_file = conn_data_folder / 'Schaefer2018_200Parcels_7Networks_count.csv'
+    sc_df = pd.read_csv(sc_file, header=None, sep=' ')
+    sc = sc_df.values
+    sc = np.log1p(sc) / np.linalg.norm(np.log1p(sc))
+
+    freqs = np.linspace(1, 80, 800, endpoint=False)
+
     for sub in range(1, 7):
         torch.cuda.empty_cache()
-        main(n_sub = sub, fit_gains=True)
+        main(empCOV=empCOV_dict[sub], h_map=h_map, 
+             dist=dist, sc=sc, freqs=freqs,
+             n_sub = sub, fit_gains=True)
+
+if __name__ == "__main__":
+    exe_main(map_name = 'T1T2')
