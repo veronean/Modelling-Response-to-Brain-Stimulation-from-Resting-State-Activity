@@ -691,10 +691,10 @@ class COVHOPF(AbstractNMM):
         a = a0 * torch.ones(n, device=device) if a0.dim() == 0 else a0
         if self.params.omega.use_heterogeneity:
             omega_raw = m(self.params.omega.value()).to(device)
-            omega = torch.sigmoid(omega_raw) * omega_ub
+            omega = torch.clamp(torch.nn.functional.softplus(omega_raw), max=omega_ub)
         else:
             mean_omega_raw = m(self.params.omega.value()).to(device)        # Intrinsic angular frequency (rad.s^-1)
-            mean_omega = torch.sigmoid(mean_omega_raw) * omega_ub           # Apply upper bound to mean
+            mean_omega = torch.nn.functional.softplus(mean_omega_raw)       # Apply upper bound to mean
             sig_omega = m(self.params.sig_omega.value()).to(device)         # Variance of the angular frequency
             omega_raw = mean_omega + sig_omega * eps
             omega = torch.clamp(omega_raw, max=omega_ub)

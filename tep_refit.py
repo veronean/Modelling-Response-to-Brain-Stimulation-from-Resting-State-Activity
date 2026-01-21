@@ -792,7 +792,7 @@ class RNNHOPF(AbstractNMM):
         a = a0 * torch.ones(n, device=self.device) if a0.dim() == 0 else a0
         
         mean_omega_raw = m(self.params.omega.value()).to(self.device)   # Intrinsic angular frequency (rad.s^-1)
-        mean_omega = torch.sigmoid(mean_omega_raw) * omega_ub           # Apply upper bound to mean
+        mean_omega = torch.nn.functional.softplus(mean_omega_raw)       # Apply upper bound to mean
         sig_omega = m(self.params.sig_omega.value()).to(self.device)    # Variance of the angular frequency
         omega_raw = mean_omega + sig_omega * eps
         omega = 2 * torch.pi * torch.clamp(omega_raw, max=omega_ub)
@@ -1457,13 +1457,18 @@ def main(static, n_sub: int = 1,
     wll0 = fitted_params['wll']
     lm0 = fitted_params['lm']
 
+    if train_region == 'Premotor':
+        k0 = 0.05
+    elif train_region == 'Prefrontal':
+        k0 = 9.35
+
     conn_gains = {
         'wll': wll0
     }
 
     params = ParamsHP(a = par(a0), omega = par(omega0), sig_omega = par(sig_omega0), 
                       g = par(g0), std_in = par(std_in0), 
-                      mu = par(mu0), k = par(2.5, fit_par=False, fit_hyper=False), 
+                      mu = par(mu0), k = par(k0), 
                       cy0 = par(cy0), y0 = par(0), 
                       ki = par(ki0),
                       wll = par(wll0, wll0, 1.8*np.ones_like(wll0), fit_par=True, fit_hyper=False),
