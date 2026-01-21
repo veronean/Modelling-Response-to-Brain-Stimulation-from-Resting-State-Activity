@@ -10,10 +10,9 @@ The repository is organized into the following directories:
 
 ### 1. `struct_data`
 
-Contains structural information used to define effective connectivity, including:
+Contains the leadfield matrix obtained through source reconstruction:
 
 - **Leadfield matrix**: Maps sources to scalp-level EEG measurements.
-- **Connection gain matrix**: Represents effective connectivity between brain regions.
 
 ### 2. `conn_data`
 
@@ -33,7 +32,10 @@ Includes information on TMS stimulation and EEG channel positions:
 
 Contains the resting-state covariance matrices for each subject. These matrices are used to fit the model to the observed brain activity.
 
-### 5. `neuromaps`
+### 5. `rest_fitpar`
+Contains the model parameters optimized at rest for each subject. These parameter, except for wll, are then used as fixed parameter in the TEP effective connectivity refitting step.
+
+### 6. `neuromaps`
 
 Holds a set of neurotransmitter receptor maps that encode regional heterogeneity in the model, allowing the simulation to account for differences in local neurochemistry.
 
