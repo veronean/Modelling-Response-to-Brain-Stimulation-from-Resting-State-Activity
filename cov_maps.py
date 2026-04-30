@@ -31,7 +31,6 @@ struct_data_folder = repo_root / 'struct_data'
 conn_data_folder = repo_root / 'conn_data'
 data_folder = repo_root / 'cov_data'
 neuromaps_folder = repo_root / 'neuromaps'
-
 def Scaler(pred, target, eps=1e-8):
     """
     Apply rescaling of the predicted values to match the norm of the target values.
@@ -481,7 +480,23 @@ class CostsTS(AbstractLoss):
         sim = simData
         emp = empData
 
-        if method == 'pearson':
+        if method == 'od_pearson':
+            eps = 1e-8
+            n = sim.shape[0]
+            mask = ~torch.eye(n, dtype=torch.bool, device=sim.device)
+            
+            sim_off = sim[mask]
+            emp_off = emp[mask]
+            
+            sim_mean = sim_off.mean()
+            emp_mean = emp_off.mean()
+            sim_std = sim_off.std(unbiased=False)
+            emp_std = emp_off.std(unbiased=False)
+
+            pearson_corr = ((sim_off - sim_mean) * (emp_off - emp_mean)).mean() / (sim_std * emp_std + eps)
+            return 1 - pearson_corr
+
+        elif method == 'pearson':
             eps = 1e-8  
             sim = sim.flatten()
             emp = emp.flatten()
@@ -667,7 +682,7 @@ class COVHOPF(AbstractNMM):
                 
         self.params_fitted = {'modelparameter': param_reg,'hyperparameter': param_hyper}
 
-    def forward(self, freq_chunk_size=20, debug_sim=False):
+    def forward(self, freq_chunk_size=20, debug_sim=False, return_source_cov=False):
         '''
         Function that computes the covariance matrix of the Hopf Whole Brain Model.
         '''
@@ -683,7 +698,7 @@ class COVHOPF(AbstractNMM):
         conduct_lb = 1.5                    # lower bound for conduct velocity
         noise_std_lb = 20                   # lower bound of std of noise
         lb = 0.01                           # lower bound of local gains
-        omega_ub = 2.0                      # upper bound of omega
+        omega_ub = 20.0                     # upper bound of omega
         eps = torch.randn(n, device=device) # Normal Distribution for omega
 
         # Extract model parameters and ensure they are on the same device
@@ -694,7 +709,7 @@ class COVHOPF(AbstractNMM):
             omega = torch.clamp(torch.nn.functional.softplus(omega_raw), max=omega_ub)
         else:
             mean_omega_raw = m(self.params.omega.value()).to(device)        # Intrinsic angular frequency (rad.s^-1)
-            mean_omega = torch.nn.functional.softplus(mean_omega_raw)       # Apply upper bound to mean
+            mean_omega = torch.nn.functional.softplus(mean_omega_raw)
             sig_omega = m(self.params.sig_omega.value()).to(device)         # Variance of the angular frequency
             omega_raw = mean_omega + sig_omega * eps
             omega = torch.clamp(omega_raw, max=omega_ub)
@@ -706,7 +721,8 @@ class COVHOPF(AbstractNMM):
 
         # Update the Laplacian based on the updated connection gains wll.
         w_l = torch.exp(self.wll) * self.sc
-        w_n_l = w_l / torch.linalg.norm(w_l)
+        row_sums = torch.sum(w_l, dim=1, keepdim=True)
+        w_n_l = w_l / (row_sums + 1e-8)
         self.sc_fitted = w_n_l
         dg_l = -torch.diag(torch.sum(w_n_l, dim=1))
 
@@ -742,6 +758,7 @@ class COVHOPF(AbstractNMM):
             return torch.linalg.inv(U_block)
 
         cov_model = torch.zeros((n_ch, n_ch), dtype=torch.float32, device=device)
+        src_cov_total = torch.zeros((n, n), dtype=torch.float32, device=device) if return_source_cov else None
 
         for i in range(0, len(self.freqs), freq_chunk_size):
             freq_batch = self.freqs[i:i+freq_chunk_size]
@@ -753,8 +770,12 @@ class COVHOPF(AbstractNMM):
                 psi_nu_sum[j] = U @ Q @ U.conj().T
 
             batch_covariance = 2 * torch.trapz(torch.real(psi_nu_sum), x=freq_batch, dim=0)
+            src_batch = batch_covariance[:n, :n]
+        
+            if return_source_cov:
+                src_cov_total += src_batch
 
-            batch_cov_model = cy0**2 * self.lm_t @ batch_covariance[:n, :n] @ (self.lm_t).T
+            batch_cov_model = cy0**2 * self.lm_t @ src_batch @ (self.lm_t).T
             cov_model += batch_cov_model
         
         def debug_matrix(matrix, name="Matrix"):
@@ -769,6 +790,10 @@ class COVHOPF(AbstractNMM):
 
         if debug_sim:
             debug_matrix(cov_model, name="simCOV")
+
+        if return_source_cov:
+            return cov_model, src_cov_total
+    
         return cov_model
 
 class Model_fitting(AbstractFitting):
@@ -878,12 +903,12 @@ class Model_fitting(AbstractFitting):
                 # OneCycleLR setup
                 if hyperparameter_optimizer: 
                     hyperparameter_scheduler = optim.lr_scheduler.OneCycleLR(hyperparameter_optimizer,
-                                                                            10 * lr_2ndLevel,
+                                                                            lr_2ndLevel,
                                                                             total_steps,
                                                                             anneal_strategy="cos")
                     hlrs = []
                 modelparameter_scheduler = optim.lr_scheduler.OneCycleLR(modelparameter_optimizer,
-                                                                        10*learningrate,
+                                                                        learningrate,
                                                                         total_steps,
                                                                         anneal_strategy="cos")
                 mlrs = []
@@ -1162,7 +1187,10 @@ class Model_fitting(AbstractFitting):
         device = self.device
 
         with torch.no_grad():
-            simCOV = self.model(freq_chunk_size=freq_chunk_size, debug_sim=debug_sim)
+            simCOV, srcCOV = self.model(freq_chunk_size=freq_chunk_size, 
+                                        debug_sim=debug_sim,
+                                        return_source_cov=True
+                                        )
 
         eps = 1e-8
         sim = simCOV / (simCOV.norm(p='fro') + eps)
@@ -1170,8 +1198,12 @@ class Model_fitting(AbstractFitting):
 
         sim_rescaled = Scaler(pred=sim, target=emp)
 
+        scale_factor = empCOV.norm(p='fro') / (simCOV.norm(p='fro') + eps)
+        src_rescaled = srcCOV * scale_factor
+
         self.sim = {
             "simCOV": sim_rescaled.detach().cpu().numpy(),
+            "srcCOV": src_rescaled.detach().cpu().numpy(),
             "empCOV": emp.detach().cpu().numpy()
         }
 
@@ -1291,7 +1323,7 @@ class CostsHP(AbstractLoss):
 #######################################################################################################################################################################################################
 
 def main(empCOV, h_map, dist, sc, freqs,
-         n_sub: int = 1, fit_gains: bool = True):
+         n_sub: int = 1, fit_gains: tuple = (True, False)):
 
     # Channel labels and sampling frequency
     with open("metadata.json", "r") as f:
@@ -1311,7 +1343,7 @@ def main(empCOV, h_map, dist, sc, freqs,
         
     wll0 = np.zeros_like(sc) + 0.05
 
-    omega0 = 10.0 / (2 * np.pi)
+    omega0 = 10.0
     sig_omega0 = 0.2
 
     freqs = np.linspace(1, 80, 800, endpoint=False)
@@ -1320,10 +1352,10 @@ def main(empCOV, h_map, dist, sc, freqs,
                     sig_omega=par(sig_omega0, fit_par=True, fit_hyper=False),
                     g=par(500, fit_par=True, fit_hyper=False), 
                     std_in= par(0.3, fit_par=True, fit_hyper=False),
-                    v_d = par(2., fit_par=True, fit_hyper=False), 
+                    v_d = par(5., fit_par=True, fit_hyper=False), 
                     cy0 = par(50, fit_par=True, fit_hyper=False),
                     lm=par(lm0),
-                    wll=par(wll0, wll0, np.ones_like(wll0), fit_par=fit_gains, fit_hyper=False))
+                    wll=par(wll0, wll0, np.ones_like(wll0), fit_par=fit_gains[0], fit_hyper=fit_gains[1]))
 
     # Simulation start
     n_epochs = 120
@@ -1331,7 +1363,7 @@ def main(empCOV, h_map, dist, sc, freqs,
 
     model = COVHOPF(node_size, output_size, sfreq, sc, dist, freqs, params, 
                     lm=lm0, wll_init=wll0, 
-                    use_fit_gains=fit_gains, use_fit_lfm=False)
+                    use_fit_gains=fit_gains[0], use_fit_lfm=False)
     ObjFun = CostsHP(model)
     F = Model_fitting(model, ObjFun)
     scheds = {'O': 'OneCycleLR', 'R': 'ReduceLROnPlateau'}
@@ -1405,7 +1437,7 @@ def exe_main(map_name: str = 'T1T2'):
         torch.cuda.empty_cache()
         main(empCOV=empCOV_dict[sub], h_map=h_map, 
              dist=dist, sc=sc, freqs=freqs,
-             n_sub = sub, fit_gains=True)
+             n_sub = sub, fit_gains=(True, True))
 
 if __name__ == "__main__":
     exe_main(map_name = 'T1T2')

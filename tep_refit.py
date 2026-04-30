@@ -665,6 +665,9 @@ class RNNHOPF(AbstractNMM):
 
         self.setModelParameters()
 
+        #lm_t = (self.lm.T / torch.sqrt(self.lm ** 2).sum(1)).T
+        #self.lm_t = (lm_t - 1 / self.output_size * torch.matmul(torch.ones((1, self.output_size), device=self.device), lm_t))
+
     def info(self):
         """
         Returns a dictionary with the names of the states and the output.
@@ -792,7 +795,7 @@ class RNNHOPF(AbstractNMM):
         a = a0 * torch.ones(n, device=self.device) if a0.dim() == 0 else a0
         
         mean_omega_raw = m(self.params.omega.value()).to(self.device)   # Intrinsic angular frequency (rad.s^-1)
-        mean_omega = torch.nn.functional.softplus(mean_omega_raw)       # Apply upper bound to mean
+        mean_omega = torch.nn.functional.softplus(mean_omega_raw)
         sig_omega = m(self.params.sig_omega.value()).to(self.device)    # Variance of the angular frequency
         omega_raw = mean_omega + sig_omega * eps
         omega = 2 * torch.pi * torch.clamp(omega_raw, max=omega_ub)
@@ -813,7 +816,10 @@ class RNNHOPF(AbstractNMM):
         dt = self.step_size
 
         w_l = torch.exp(self.wll) * self.sc
-        w_n_l = w_l / torch.linalg.norm(w_l)
+        #w_l = torch.exp(torch.clamp(self.wll, max=3, min=-3)) * self.sc
+        row_sums = torch.sum(w_l, dim=1, keepdim=True)
+        w_n_l = w_l / (row_sums + 1e-8)
+        #w_n_l = w_l / torch.linalg.norm(w_l)
         self.sc_fitted = w_n_l
         dg_l = -torch.diag(torch.sum(w_n_l, dim=1))
 
@@ -828,20 +834,16 @@ class RNNHOPF(AbstractNMM):
 
         # Use the forward model to get EEG signal at the i-th element in the window.
         for i_window in range(self.TRs_per_window):
+            u_tr = external[:, :, i_window]
             for step_i in range(self.steps_per_TR):
-                Edx = torch.tensor(np.zeros((self.node_size, self.node_size)), dtype=torch.float32, device=self.device)  
-                Edy = torch.tensor(np.zeros((self.node_size, self.node_size)), dtype=torch.float32, device=self.device) 
-                hEx_new = hEx.clone()
-                hEy_new = hEy.clone()
-                Edx = hEx_new.gather(1, self.delays)
-                Edy = hEy_new.gather(1, self.delays)
-                LEd_x = torch.reshape(torch.sum(w_n_l * torch.transpose(Edx, 0, 1), 1),
-                                      (self.node_size, 1))
-                LEd_y = torch.reshape(torch.sum(w_n_l * torch.transpose(Edy, 0, 1), 1),
-                                    (self.node_size, 1))
+                Edx = hEx.gather(1, self.delays)
+                Edy = hEy.gather(1, self.delays)
+                # Linear coupling
+                LEd_x = torch.sum(w_n_l * Edx.T, dim=1, keepdim=True)
+                LEd_y = torch.sum(w_n_l * Edy.T, dim=1, keepdim=True)
 
                 # TMS input
-                u_tms = external[:, step_i:step_i + 1, i_window]
+                u_tms = u_tr[:, step_i:step_i+1]
                 rX = k * ki * u_tms + std_in * torch.randn(self.node_size, 1, device=self.device) + \
                     1 * g * (LEd_x + 1 * torch.matmul(dg_l, X)) 
                 rY = std_in * torch.randn(self.node_size, 1, device=self.device) + \
@@ -854,10 +856,6 @@ class RNNHOPF(AbstractNMM):
                 # Calculate the saturation for model states (for stability and gradient calculation).
                 X = 1000*torch.tanh(dX/1000)
                 Y = 1000*torch.tanh(dY/1000)
-
-                # Update placeholders for buffer
-                hEx[:, 0] = X[:, 0]
-                hEy[:, 0] = Y[:, 0]
 
             # Capture the states at every tr in the placeholders for checking them visually.
             X_window.append(X)
@@ -974,14 +972,16 @@ class Model_fitting(AbstractFitting):
             # total_steps = self.num_windows*num_epochs
             if use_hyper:
                 hyperparameter_scheduler = optim.lr_scheduler.OneCycleLR(hyperparameter_optimizer,
-                                                                        lr_2ndLevel,
+                                                                        10*lr_2ndLevel,
                                                                         total_steps,
-                                                                        anneal_strategy = "cos")
+                                                                        anneal_strategy = "cos",
+                                                                        pct_start=0.1)
                 hlrs = []
             modelparameter_scheduler = optim.lr_scheduler.OneCycleLR(modelparameter_optimizer,
-                                                                     learningrate,
+                                                                     10*learningrate,
                                                                      total_steps,
-                                                                     anneal_strategy = "cos")
+                                                                     anneal_strategy = "cos",
+                                                                     pct_start=0.1)
             mlrs = []
 
         # initial state
@@ -1315,7 +1315,8 @@ class CostsJR(AbstractLoss):
         lb = 0.001
 
         w_cost = 1
-        w_prior = 3e-4
+        w_prior = 1e-5
+        w_prior_lm = 1e-5
 
         # define the relu function
         m = torch.nn.ReLU()
@@ -1329,6 +1330,7 @@ class CostsJR(AbstractLoss):
             exclude_param.append('lm') 
 
         loss_main = self.mainLoss.loss(sim, emp)
+        loss_total_prior = 0
 
         loss_EI = 0
         loss_prior = []
@@ -1339,10 +1341,12 @@ class CostsJR(AbstractLoss):
             var = getattr(model.params, var_name)
             if var.has_prior and var_name not in ['std_in'] and \
                         var_name not in exclude_param:
-                loss_prior.append(torch.sum(((m(var.val) - m(var.prior_mean)) ** 2) * 1/(lb + m(var.prior_var))) \
-                                  + torch.sum(-torch.log(lb + m(var.prior_var))))
+                term = torch.sum(((m(var.val) - m(var.prior_mean)) ** 2) * 1/(lb + m(var.prior_var))) \
+                                  + torch.sum(-torch.log(lb + m(var.prior_var)))
+                current_weight = w_prior_lm if var_name == 'lm' else w_prior
+                loss_total_prior += current_weight * term
         # total loss
-        loss =  w_cost * loss_main + w_prior * sum(loss_prior) + 1 * loss_EI
+        loss = w_cost * loss_main + loss_total_prior + 1 * loss_EI
         return loss
 
 def prepare_static():
@@ -1442,7 +1446,13 @@ def main(static, n_sub: int = 1,
     st_file = tms_data_folder / ('stim_weights_' + train_region + '.npy')
     stim_weights = np.load(st_file)
     stim_weights_thr = stim_weights.copy()
+    if train_region == 'Prefrontal':
+        threshold = 0.80
+    else:
+        threshold = 0.10
+
     ki0 = stim_weights_thr[:,np.newaxis]
+    ki0[ki0 <= threshold] = 0
 
     # Load rest fit parameters estimate (averaged over last 10 epochs)
     fitted_params = np.load(rest_fitpar_folder / f"Sub{n_sub}_params.npz")
@@ -1457,10 +1467,10 @@ def main(static, n_sub: int = 1,
     wll0 = fitted_params['wll']
     lm0 = fitted_params['lm']
 
-    if train_region == 'Premotor':
-        k0 = 0.05
-    elif train_region == 'Prefrontal':
-        k0 = 9.35
+    if train_region == 'Prefrontal':
+        k0 = 0.1
+    else:
+        k0 = 6.0
 
     conn_gains = {
         'wll': wll0
@@ -1505,7 +1515,7 @@ def main(static, n_sub: int = 1,
 
     # model training
     u = np.zeros((node_size, hidden_size, time_dim))
-    ts, te =  0.0965, 0.1103
+    ts, te =  0.0985, 0.1085
     pulse_start = int(sfreq * ts)
     pulse_end = int(sfreq * te)
     u[:,:,pulse_start:pulse_end] = 1000
@@ -1548,7 +1558,6 @@ def main(static, n_sub: int = 1,
 def exe_main():
     static = prepare_static()
     stim_sites = ['Premotor', 'Prefrontal']
-    #stim_sites = ['Premotor']
 
     for site in stim_sites:
         for sub in range(1, 7):
