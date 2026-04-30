@@ -1404,7 +1404,7 @@ def exe_main(map_name: str = 'T1T2'):
     # Load correlation on the resting state
     empCOV_dict = {
         sub: torch.tensor(
-            pickle.load(open(data_folder / f'SUB{sub}_RES.pkl', "rb"))['cov_raw'],
+            pickle.load(open(data_folder / f'SUB{sub}_RES.pkl', "rb"))['cov_train'],
             dtype=torch.float32,
             device='cuda' if torch.cuda.is_available() else 'cpu'
         )
